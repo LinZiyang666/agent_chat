@@ -1,0 +1,30 @@
+# Build artifacts
+/bin/
+/dist/
+
+# Go test / coverage artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Runtime artifacts (agentchat data dir if someone runs daemon from repo root)
+.agentchat/
+*.db
+*.db-wal
+*.db-shm
+agentchatd.sock
+master.key
+
+# Attachments cache
+attachments/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
