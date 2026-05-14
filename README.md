@@ -11,8 +11,9 @@ TTY-friendly fallbacks for humans.
 
 ## Status
 
-Early development. M1 (repository skeleton) is the current milestone — see
-`docs/04-roadmap.md` for the full plan.
+Early development. M2 (daemon + accounts + auth) is the latest closed
+milestone; M3 (Discord bot adapter) is next. See `docs/04-roadmap.md`
+for the full plan.
 
 ## Components
 
@@ -22,7 +23,8 @@ Early development. M1 (repository skeleton) is the current milestone — see
 
 ## Building
 
-Requires Go 1.22 or newer.
+Requires Go 1.25 or newer (raised from 1.22 in M2 by a transitive
+golang.org/x/crypto dependency).
 
 ```
 make build
@@ -36,8 +38,8 @@ make build
 ```
 make test          # all packages
 make test-race     # with race detector
-make cover         # coverage summary
-make smoke         # end-to-end smoke test (M1)
+make cover         # coverage summary (code-bearing packages only)
+make smoke         # end-to-end smoke tests (M1 + M2)
 ```
 
 ## Documentation

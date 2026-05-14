@@ -8,6 +8,7 @@
 >
 > ## 里程碑进度
 > - **M1 仓库骨架**：✅ 完成 (2026-05-13)。Phase 3 PASS，2 Minor/Nit 已 triage。详见 [`milestones/M1-phase1.md`](./milestones/M1-phase1.md) / [`-phase2.md`](./milestones/M1-phase2.md) / [`-phase3.md`](./milestones/M1-phase3.md)。
+> - **M2 daemon + 账号 + 鉴权**：✅ 完成 (2026-05-13)。Phase 3 初审 FAIL（1 Blocker + 8 Major），全部修复后 PASS。详见 [`milestones/M2-phase1.md`](./milestones/M2-phase1.md) / [`-phase2.md`](./milestones/M2-phase2.md) / [`-phase3.md`](./milestones/M2-phase3.md)。
 
 ## 1. 目标
 
