@@ -6,7 +6,9 @@ import (
 	"time"
 )
 
-// statusRecorder wraps an http.ResponseWriter to remember the status code.
+// statusRecorder wraps an http.ResponseWriter to remember the status
+// code while preserving the http.Flusher capability that streaming
+// handlers depend on (e.g. /v1/debug/events NDJSON).
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
@@ -25,6 +27,16 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	n, err := s.ResponseWriter.Write(b)
 	s.bytes += n
 	return n, err
+}
+
+// Flush delegates to the underlying ResponseWriter when it supports
+// http.Flusher. Without this explicit forward, embedded-interface
+// method promotion does NOT carry Flush over, since Flush is not in
+// http.ResponseWriter's method set — breaking any streaming handler.
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // Logger emits one slog.Info record per request with method, path,

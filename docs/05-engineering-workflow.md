@@ -240,19 +240,23 @@ Every milestone (M1 through M8) goes through three phases. **A milestone is not 
 
 **Mindset:** a senior engineer who has never seen this code, has the requirements + architecture docs in hand, and is paid to find problems.
 
-**Crucial:** the auditor is **not the developer**. In our setup, the auditor is a **fresh `Agent` subagent** with no conversation history — it sees only the documents and the code, not the developer's intent.
+**Crucial:** the auditor is **not the developer**. The developer (the Claude agent doing implementation in the current conversation) **must not spawn the auditor** — that would leak the developer's context into the audit and defeat the purpose.
 
-**Activities:**
+In this project, the **user drives Phase 3 themselves**, typically with their own independent tool / agent / session. The developer hands off after writing the Phase 1+2 reports and waits for the audit report to land at `docs/milestones/M<N>-phase3.md`.
 
-1. **Spawn a fresh audit agent** via the `Agent` tool with `subagent_type: general-purpose`. Brief it with:
+**Developer's responsibilities (Phase 3 prep, NOT execution):**
+
+1. Make sure the audit-input documents are up to date and self-contained:
    - The requirements baseline: `docs/02-requirements-final.md`
    - The architecture: `docs/03-architecture.md`
    - The coding rules: `docs/05-engineering-workflow.md` (this doc)
    - The milestone scope: relevant section of `docs/04-roadmap.md`
    - The Phase 1 and Phase 2 reports
-   - The code changes (a list of files; the agent reads them itself)
+   - The code changes (the working tree is the source of truth; commit only AFTER Phase 3 triage closes)
+2. State explicitly in the hand-off message that the user should kick off Phase 3.
+3. **Wait.** Do not spawn `Agent` for the audit. Do not invoke `/ultrareview`. Do not run probes that simulate an audit — the user (or their independent reviewer) will do all of that.
 
-2. **Ask the auditor to produce an issue list** along these dimensions:
+2. **The auditor produces an issue list** along these dimensions:
    - **Correctness:** does the code actually implement what the milestone scope says?
    - **Decoupling:** any forbidden imports? any business code that knows about Discord?
    - **Clarity:** any function that's hard to follow? any naming that misleads?
@@ -278,10 +282,10 @@ Every milestone (M1 through M8) goes through three phases. **A milestone is not 
 - All Blocker and Major issues are resolved (or formally accepted by the user with a written reason).
 - Triage decisions are recorded in the audit report's footer.
 
-**Why an Agent subagent and not just self-review:**
-- A fresh agent has no developer bias ("I know what I meant").
+**Why the user drives Phase 3, not the developer agent:**
+- A fresh independent reviewer has no developer bias ("I know what I meant").
 - It reads the code against the *documents*, not against the developer's mental model.
-- It's cheap and repeatable — every milestone, same protocol.
+- Hand-off forces the developer to write self-contained Phase 1+2 reports rather than rely on conversation state.
 
 **Optional escalation:** for milestones that touch sensitive areas (M2 auth, M3 Discord adapter, M7 attachment handling), the user may additionally run `/ultrareview` (cloud multi-agent review) or `/security-review`. These are user-triggered.
 
@@ -335,14 +339,14 @@ PHASE 1 + 2 — IMPLEMENT & TEST (continuous, no pause)
 [ ] write docs/milestones/M<N>-phase1.md (what built)
 [ ] write docs/milestones/M<N>-phase2.md (how tested)
 
-═══ HARD PAUSE: hand off to fresh auditor ═══
+═══ HARD PAUSE: hand off to USER for Phase 3 ═══
 
-PHASE 3 — AUDIT
-[ ] spawn fresh audit agent (subagent_type: general-purpose)
-[ ] brief with reqs + arch + rules + milestone scope + phase 1/2 reports
-[ ] receive issue list
-[ ] write docs/milestones/M<N>-phase3.md
-[ ] triage with user
+PHASE 3 — AUDIT (driven by USER, not the developer agent)
+[ ] developer: confirm phase1.md + phase2.md are self-contained
+[ ] developer: hand-off message tells user "Phase 3 is yours to start"
+[ ] USER runs the audit (their own tool / agent / session)
+[ ] USER writes docs/milestones/M<N>-phase3.md
+[ ] developer + user triage findings together
 [ ] all Blocker/Major fixed (or formally accepted)
 [ ] tag commit m<N>-complete
 [ ] WAIT for user "go" before next milestone
@@ -362,3 +366,4 @@ If you catch yourself or the auditor catches you doing any of these, **stop and 
 - "Let me add a TODO and move on" — TODOs are tracked debt; if it's Blocker/Major, it doesn't get a TODO, it gets fixed.
 - "I'll write the comment in Chinese, it's faster" — no, English only.
 - "I know cobra's API, no need to check docs" — Rule 1.8 has no exceptions.
+- "I'll spawn an Agent to do the Phase 3 audit" — **no.** Phase 3 is user-driven; the developer agent never spawns the auditor. The developer's job ends at writing self-contained Phase 1+2 reports and handing off.

@@ -20,7 +20,10 @@ import (
 	"github.com/LinZiyang666/agentchat/internal/api"
 	"github.com/LinZiyang666/agentchat/internal/audit"
 	"github.com/LinZiyang666/agentchat/internal/auth"
+	"github.com/LinZiyang666/agentchat/internal/bot"
+	"github.com/LinZiyang666/agentchat/internal/bot/discord"
 	"github.com/LinZiyang666/agentchat/internal/config"
+	"github.com/LinZiyang666/agentchat/internal/connector"
 	"github.com/LinZiyang666/agentchat/internal/crypto"
 	"github.com/LinZiyang666/agentchat/internal/errcode"
 	"github.com/LinZiyang666/agentchat/internal/store/sqlite"
@@ -84,7 +87,8 @@ func runServe(ctx context.Context) error {
 	log := newLogger(cfg.Log.Level)
 	log.Info("starting", "version", Version, "config", cfg.String())
 
-	if _, err := crypto.LoadOrCreateMasterKey(cfg.KeyPath); err != nil {
+	masterKey, err := crypto.LoadOrCreateMasterKey(cfg.KeyPath)
+	if err != nil {
 		return err
 	}
 
@@ -98,6 +102,12 @@ func runServe(ctx context.Context) error {
 	accountSvc := account.NewService(bundle.Accounts)
 	auditRec := audit.NewRecorder(bundle.Audit)
 	authMgr := auth.NewManager(bundle.Tokens)
+	// Discord-backed Provider factory; future Matrix/Slack adapters
+	// would swap this in test or via config.
+	conn := connector.New(func(token string, hint bot.Identity) bot.Provider {
+		return discord.New(token, hint, discord.Options{})
+	}, log)
+	defer conn.Shutdown(context.Background())
 
 	if err := bootstrapRoot(ctx, accountSvc, authMgr); err != nil {
 		return err
@@ -125,6 +135,8 @@ func runServe(ctx context.Context) error {
 		Auth:        authMgr,
 		Audit:       auditRec,
 		Bundler:     db, // *sqlite.Store implements store.Bundler
+		Connector:   conn,
+		MasterKey:   masterKey,
 	})
 
 	srv := &http.Server{

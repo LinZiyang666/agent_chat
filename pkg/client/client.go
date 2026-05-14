@@ -206,6 +206,135 @@ func (c *Client) RevokeToken(ctx context.Context, tokenID string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/tokens/"+tokenID, nil, nil)
 }
 
+// ---- M3: Discord + lifecycle ----
+
+// SetDiscord encrypts and stores a bot token on the given account.
+func (c *Client) SetDiscord(ctx context.Context, accountID, botToken string) (*apiv1.AccountResponse, error) {
+	var out apiv1.AccountResponse
+	err := c.do(ctx, http.MethodPost,
+		fmt.Sprintf("/v1/accounts/%s/discord", accountID),
+		apiv1.SetDiscordRequest{BotToken: botToken}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Online brings the account's Discord Provider online.
+func (c *Client) Online(ctx context.Context, accountID string) (*apiv1.StatusResponse, error) {
+	var out apiv1.StatusResponse
+	err := c.do(ctx, http.MethodPost,
+		fmt.Sprintf("/v1/accounts/%s/online", accountID), nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Offline disconnects the account's Provider.
+func (c *Client) Offline(ctx context.Context, accountID string) (*apiv1.StatusResponse, error) {
+	var out apiv1.StatusResponse
+	err := c.do(ctx, http.MethodPost,
+		fmt.Sprintf("/v1/accounts/%s/offline", accountID), nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Status returns the current lifecycle + Provider status of accountID.
+func (c *Client) Status(ctx context.Context, accountID string) (*apiv1.StatusResponse, error) {
+	var out apiv1.StatusResponse
+	err := c.do(ctx, http.MethodGet,
+		fmt.Sprintf("/v1/accounts/%s/status", accountID), nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DebugSend asks the daemon to send a message via the account's live
+// Provider. M3 diagnostic; the M4 rooms subsystem will replace it.
+func (c *Client) DebugSend(ctx context.Context, accountID, channelID, content string) (*apiv1.DebugSendResponse, error) {
+	var out apiv1.DebugSendResponse
+	err := c.do(ctx, http.MethodPost, "/v1/debug/send", apiv1.DebugSendRequest{
+		AccountID: accountID,
+		ChannelID: channelID,
+		Content:   content,
+	}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// StreamEvents opens an NDJSON event stream for accountID. Each line
+// in the response body decodes into an Event. The channel is closed
+// when ctx is cancelled or the daemon closes the connection.
+//
+// Caller responsibilities:
+//   - call cancel on the supplied context to stop the stream early;
+//   - drain the channel until it is closed.
+func (c *Client) StreamEvents(ctx context.Context, accountID string) (<-chan Event, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.baseURL+"/v1/debug/events?account="+accountID, nil)
+	if err != nil {
+		return nil, errcode.Wrap(err, errcode.Internal, "build request")
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	// Streaming endpoint: disable any per-request timeout for this
+	// call. The transport-level dial timeout still applies via the
+	// underlying RoundTripper.
+	streamClient := &http.Client{Transport: c.httpClient.Transport}
+	resp, err := streamClient.Do(req)
+	if err != nil {
+		return nil, errcode.Wrap(err, errcode.Unavailable, "open event stream")
+	}
+	if resp.StatusCode >= 400 {
+		var env apiv1.ErrorEnvelope
+		raw, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if jerr := json.Unmarshal(raw, &env); jerr == nil && env.Error.Code != "" {
+			return nil, (&errcode.Error{
+				Code:    errcode.Code(env.Error.Code),
+				Message: env.Error.Message,
+			}).WithDetails(env.Error.Details)
+		}
+		return nil, errcode.New(errcode.Internal,
+			"daemon returned HTTP %d on stream open: %s", resp.StatusCode, string(raw))
+	}
+
+	out := make(chan Event, 32)
+	go streamEvents(resp, out)
+	return out, nil
+}
+
+// streamEvents reads NDJSON from resp.Body and pushes onto out.
+// Closes the channel on EOF, decode error, or context cancellation.
+func streamEvents(resp *http.Response, out chan<- Event) {
+	defer close(out)
+	defer resp.Body.Close()
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var ev Event
+		if err := dec.Decode(&ev); err != nil {
+			return
+		}
+		out <- ev
+	}
+}
+
+// Event is the pkg/client view of a daemon event (mirrors the daemon's
+// NDJSON envelope shape).
+type Event struct {
+	Type     string      `json:"type"`
+	Message  interface{} `json:"message,omitempty"`
+	Identity interface{} `json:"identity,omitempty"`
+	Reason   string      `json:"reason,omitempty"`
+}
+
 // ---- Audit ----
 
 // ListAuditOptions narrows ListAudit results.

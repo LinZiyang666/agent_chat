@@ -8,6 +8,7 @@ import (
 	"github.com/LinZiyang666/agentchat/internal/account"
 	"github.com/LinZiyang666/agentchat/internal/audit"
 	"github.com/LinZiyang666/agentchat/internal/auth"
+	"github.com/LinZiyang666/agentchat/internal/connector"
 	"github.com/LinZiyang666/agentchat/internal/errcode"
 	"github.com/LinZiyang666/agentchat/internal/store"
 )
@@ -139,15 +140,25 @@ func UpdateAccount(svc *account.Service, bundler store.Bundler, recorder *audit.
 
 // DeleteAccount handles DELETE /v1/accounts/{id}.
 //
+// Lifecycle guard (M3-P3-001 fix): if the Connector still has a live
+// Provider for this account, the request is rejected with Conflict
+// and the operator must bring the account offline first. Without
+// this guard a deleted account could keep a Discord session running
+// indefinitely with no way to reach it through the API.
+//
 // Transactional: the account row and audit row are removed/written
-// inside one transaction (M2-P3-012 fix). The 404 path produces no
-// audit row.
-func DeleteAccount(bundler store.Bundler, recorder *audit.Recorder) http.HandlerFunc {
+// inside one transaction (M2-P3-012 fix).
+func DeleteAccount(bundler store.Bundler, recorder *audit.Recorder, conn *connector.Connector) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		actor, ok := auth.AccountFromContext(r.Context())
 		if !ok {
 			WriteError(w, errcode.New(errcode.Internal, "no actor in context"))
+			return
+		}
+		if conn != nil && conn.IsRegistered(id) {
+			WriteError(w, errcode.New(errcode.Conflict,
+				"account %s has a live Discord provider; call 'admin account offline' first", id))
 			return
 		}
 		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {

@@ -21,11 +21,14 @@ import (
 type Action string
 
 const (
-	ActionAccountCreate Action = "account.create"
-	ActionAccountUpdate Action = "account.update"
-	ActionAccountDelete Action = "account.delete"
-	ActionTokenCreate   Action = "token.create"
-	ActionTokenRevoke   Action = "token.revoke"
+	ActionAccountCreate     Action = "account.create"
+	ActionAccountUpdate     Action = "account.update"
+	ActionAccountDelete     Action = "account.delete"
+	ActionAccountSetDiscord Action = "account.discord_set"
+	ActionAccountOnline     Action = "account.online"
+	ActionAccountOffline    Action = "account.offline"
+	ActionTokenCreate       Action = "token.create"
+	ActionTokenRevoke       Action = "token.revoke"
 )
 
 // Deprecated aliases retained so older payloads (or external readers
