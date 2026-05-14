@@ -13,6 +13,7 @@ import (
 	"github.com/LinZiyang666/agentchat/internal/auth"
 	"github.com/LinZiyang666/agentchat/internal/connector"
 	"github.com/LinZiyang666/agentchat/internal/message"
+	"github.com/LinZiyang666/agentchat/internal/state"
 	"github.com/LinZiyang666/agentchat/internal/store"
 )
 
@@ -41,6 +42,12 @@ type Deps struct {
 	// background goroutine writes message rows + per-subscriber state
 	// inside bundler.WithTx.
 	Ingester *message.Ingester
+	// StateBus is the M5 state-fan-out engine. Mutation handlers call
+	// Publish(accountID) after their tx commits to schedule a
+	// debounced snapshot rebuild for the watchers on that account.
+	// Handlers nil-check this field so test rigs that don't need
+	// state can leave it empty.
+	StateBus *state.Bus
 }
 
 // NewRouter builds the chi router with the full /v1 surface. Returned
@@ -93,24 +100,28 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/debug/events", apiv1.DebugEvents(d.Connector))
 
 				// M4: rooms (admin-only mutations except member self-PATCH).
-				r.Post("/rooms", apiv1.CreateRoom(d.Connector, d.Bundler, d.Audit))
-				r.Patch("/rooms/{id}", apiv1.UpdateRoom(d.Connector, d.Bundler, d.Audit))
-				r.Post("/rooms/{id}/archive", apiv1.ArchiveRoom(d.Bundler, d.Audit))
-				r.Delete("/rooms/{id}", apiv1.DeleteRoom(d.Connector, d.Bundler, d.Audit))
-				r.Post("/rooms/{id}/members", apiv1.InviteMember(d.Connector, d.Bundler, d.Audit))
-				r.Delete("/rooms/{id}/members/{account_id}", apiv1.KickMember(d.Connector, d.Bundler, d.Audit))
+				r.Post("/rooms", apiv1.CreateRoom(d.Connector, d.Bundler, d.Audit, d.StateBus))
+				r.Patch("/rooms/{id}", apiv1.UpdateRoom(d.Connector, d.Bundler, d.Audit, d.StateBus))
+				r.Post("/rooms/{id}/archive", apiv1.ArchiveRoom(d.Bundler, d.Audit, d.StateBus))
+				r.Delete("/rooms/{id}", apiv1.DeleteRoom(d.Connector, d.Bundler, d.Audit, d.StateBus))
+				r.Post("/rooms/{id}/members", apiv1.InviteMember(d.Connector, d.Bundler, d.Audit, d.StateBus))
+				r.Delete("/rooms/{id}/members/{account_id}", apiv1.KickMember(d.Connector, d.Bundler, d.Audit, d.StateBus))
 			})
 
 			// Member-and-admin operations (auth required, no admin gate).
 			r.Get("/rooms", apiv1.ListRooms(d.Accounts, d.Bundler))
 			r.Get("/rooms/{id}", apiv1.GetRoom(d.Bundler))
 			r.Get("/rooms/{id}/members", apiv1.ListMembers(d.Bundler))
-			r.Patch("/memberships/{room_id}", apiv1.UpdateMembership(d.Bundler, d.Audit))
+			r.Patch("/memberships/{room_id}", apiv1.UpdateMembership(d.Bundler, d.Audit, d.StateBus))
 
-			r.Post("/rooms/{id}/messages", apiv1.SendMessage(d.Connector, d.Bundler, d.Audit))
+			r.Post("/rooms/{id}/messages", apiv1.SendMessage(d.Connector, d.Bundler, d.Audit, d.StateBus))
 			r.Get("/rooms/{id}/messages", apiv1.ListMessages(d.Bundler))
-			r.Post("/messages/{id}/read", apiv1.MarkRead(d.Bundler, d.Audit))
-			r.Post("/messages/{id}/reply-ack", apiv1.ReplyAck(d.Bundler, d.Audit))
+			r.Post("/messages/{id}/read", apiv1.MarkRead(d.Bundler, d.Audit, d.StateBus))
+			r.Post("/messages/{id}/reply-ack", apiv1.ReplyAck(d.Bundler, d.Audit, d.StateBus))
+
+			// M5: state view (one-shot + watch NDJSON).
+			r.Get("/state", apiv1.GetState(d.StateBus))
+			r.Get("/state/watch", apiv1.WatchState(d.StateBus))
 		})
 	})
 

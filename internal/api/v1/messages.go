@@ -1,6 +1,7 @@
 package v1
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/LinZiyang666/agentchat/internal/bot"
 	"github.com/LinZiyang666/agentchat/internal/connector"
 	"github.com/LinZiyang666/agentchat/internal/errcode"
+	"github.com/LinZiyang666/agentchat/internal/state"
 	"github.com/LinZiyang666/agentchat/internal/store"
 )
 
@@ -41,7 +43,7 @@ import (
 //     - Write the message.send audit row using the persisted id
 //     regardless of which path won the insert race (M4-P3-007). The
 //     payload carries race_with_ingest so audit forensics can tell.
-func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *audit.Recorder) http.HandlerFunc {
+func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		roomID := chi.URLParam(r, "id")
 		var req SendMessageRequest
@@ -240,8 +242,37 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 			WriteError(w, err)
 			return
 		}
+		// Notify every member of the room — new message changes
+		// everyone's state (unread, mentions, priority feeds). M5
+		// debounce coalesces bursts.
+		go publishRoomMembers(bus, bundler, roomID)
 		WriteJSON(w, http.StatusCreated, MessageToResponse(persisted))
 	}
+}
+
+// publishRoomMembers fetches the room's current members and calls
+// bus.PublishMany on their account ids. Runs in a goroutine off the
+// request path so the HTTP response isn't delayed. Errors are
+// swallowed (Bus.Publish is best-effort and the next Publish will
+// re-converge).
+func publishRoomMembers(bus *state.Bus, bundler store.Bundler, roomID string) {
+	if bus == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = bundler.WithTx(ctx, func(b store.Bundle) error {
+		ms, err := b.Memberships.ListByRoom(ctx, roomID)
+		if err != nil {
+			return err
+		}
+		ids := make([]string, 0, len(ms))
+		for _, m := range ms {
+			ids = append(ids, m.AccountID)
+		}
+		bus.PublishMany(ids)
+		return nil
+	})
 }
 
 // ListMessages handles GET /v1/rooms/{id}/messages?before=&limit=.
@@ -306,21 +337,21 @@ func ListMessages(bundler store.Bundler) http.HandlerFunc {
 }
 
 // MarkRead handles POST /v1/messages/{id}/read.
-func MarkRead(bundler store.Bundler, recorder *audit.Recorder) http.HandlerFunc {
-	return mutateMessageState(bundler, recorder, audit.ActionMessageRead,
+func MarkRead(bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus) http.HandlerFunc {
+	return mutateMessageState(bundler, recorder, bus, audit.ActionMessageRead,
 		func(now time.Time, s *store.MessageState) { s.ReadAt = &now })
 }
 
 // ReplyAck handles POST /v1/messages/{id}/reply-ack.
-func ReplyAck(bundler store.Bundler, recorder *audit.Recorder) http.HandlerFunc {
-	return mutateMessageState(bundler, recorder, audit.ActionMessageReplyAck,
+func ReplyAck(bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus) http.HandlerFunc {
+	return mutateMessageState(bundler, recorder, bus, audit.ActionMessageReplyAck,
 		func(now time.Time, s *store.MessageState) { s.RepliedAt = &now })
 }
 
 // mutateMessageState is the shared body for MarkRead and ReplyAck: the
 // actor sets one of the two timestamps on their own MessageState row
 // (which may not yet exist).
-func mutateMessageState(bundler store.Bundler, recorder *audit.Recorder,
+func mutateMessageState(bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus,
 	action audit.Action,
 	patch func(now time.Time, s *store.MessageState),
 ) http.HandlerFunc {
@@ -360,6 +391,8 @@ func mutateMessageState(bundler store.Bundler, recorder *audit.Recorder,
 			WriteError(w, err)
 			return
 		}
+		// Only the actor's own state changed; publish just them.
+		bus.Publish(out.AccountID)
 		WriteJSON(w, http.StatusOK, MessageStateToResponse(out))
 	}
 }

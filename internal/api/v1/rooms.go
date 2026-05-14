@@ -15,6 +15,7 @@ import (
 	"github.com/LinZiyang666/agentchat/internal/bot"
 	"github.com/LinZiyang666/agentchat/internal/connector"
 	"github.com/LinZiyang666/agentchat/internal/errcode"
+	"github.com/LinZiyang666/agentchat/internal/state"
 	"github.com/LinZiyang666/agentchat/internal/store"
 )
 
@@ -59,7 +60,7 @@ func providerForActor(conn *connector.Connector, actorID string) (bot.Provider, 
 //     does not auto-subscribe; M4 demo follows roadmap §5 conventions),
 //     and write the room.create audit row.
 //  4. On tx failure best-effort delete the just-created Discord channel.
-func CreateRoom(conn *connector.Connector, bundler store.Bundler, recorder *audit.Recorder) http.HandlerFunc {
+func CreateRoom(conn *connector.Connector, bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateRoomRequest
 		if err := DecodeJSON(r, &req); err != nil {
@@ -124,6 +125,8 @@ func CreateRoom(conn *connector.Connector, bundler store.Bundler, recorder *audi
 			WriteError(w, err)
 			return
 		}
+		// Creator is the only initial member; publish to them.
+		bus.Publish(actor.ID)
 		WriteJSON(w, http.StatusCreated, RoomToResponse(created))
 	}
 }
@@ -202,7 +205,7 @@ func GetRoom(bundler store.Bundler) http.HandlerFunc {
 // UpdateRoom handles PATCH /v1/rooms/{id}. Admin only. Name is the
 // only mutable field today; the channel-side rename is best-effort
 // (Discord channel-name retains discord-side validation rules).
-func UpdateRoom(conn *connector.Connector, bundler store.Bundler, recorder *audit.Recorder) http.HandlerFunc {
+func UpdateRoom(conn *connector.Connector, bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		var req UpdateRoomRequest
@@ -241,6 +244,8 @@ func UpdateRoom(conn *connector.Connector, bundler store.Bundler, recorder *audi
 			WriteError(w, err)
 			return
 		}
+		// Rename touches every member's room name in their state.
+		go publishRoomMembers(bus, bundler, id)
 		WriteJSON(w, http.StatusOK, RoomToResponse(updated))
 	}
 }
@@ -248,7 +253,7 @@ func UpdateRoom(conn *connector.Connector, bundler store.Bundler, recorder *audi
 // ArchiveRoom handles POST /v1/rooms/{id}/archive. Sets archived = 1
 // but keeps the Discord channel and the DB row intact (history
 // survives).
-func ArchiveRoom(bundler store.Bundler, recorder *audit.Recorder) http.HandlerFunc {
+func ArchiveRoom(bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		actor, ok := auth.AccountFromContext(r.Context())
@@ -274,6 +279,8 @@ func ArchiveRoom(bundler store.Bundler, recorder *audit.Recorder) http.HandlerFu
 			WriteError(w, err)
 			return
 		}
+		// Archive affects everyone whose state listed this room.
+		go publishRoomMembers(bus, bundler, id)
 		WriteJSON(w, http.StatusOK, RoomToResponse(updated))
 	}
 }
@@ -294,7 +301,7 @@ func ArchiveRoom(bundler store.Bundler, recorder *audit.Recorder) http.HandlerFu
 //
 // The schema's ON DELETE CASCADE clears memberships, messages, and
 // message_states for free when the row is finally deleted.
-func DeleteRoom(conn *connector.Connector, bundler store.Bundler, recorder *audit.Recorder) http.HandlerFunc {
+func DeleteRoom(conn *connector.Connector, bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		actor, ok := auth.AccountFromContext(r.Context())
@@ -307,13 +314,25 @@ func DeleteRoom(conn *connector.Connector, bundler store.Bundler, recorder *audi
 			WriteError(w, err)
 			return
 		}
-		var channelID string
+		// Snapshot the member list BEFORE delete cascades it. Used
+		// for the post-commit state publish.
+		var (
+			channelID string
+			memberIDs []string
+		)
 		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {
 			room, err := b.Rooms.Get(r.Context(), id)
 			if err != nil {
 				return err
 			}
 			channelID = room.DiscordChannelID
+			members, err := b.Memberships.ListByRoom(r.Context(), id)
+			if err != nil {
+				return err
+			}
+			for _, m := range members {
+				memberIDs = append(memberIDs, m.AccountID)
+			}
 			return nil
 		}); err != nil {
 			WriteError(w, err)
@@ -337,6 +356,7 @@ func DeleteRoom(conn *connector.Connector, bundler store.Bundler, recorder *audi
 			WriteError(w, err)
 			return
 		}
+		bus.PublishMany(memberIDs)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -360,7 +380,7 @@ func DeleteRoom(conn *connector.Connector, bundler store.Bundler, recorder *audi
 //
 // Target's account must exist AND have come online once so we have a
 // bot_user_id to grant the channel permission override.
-func InviteMember(conn *connector.Connector, bundler store.Bundler, recorder *audit.Recorder) http.HandlerFunc {
+func InviteMember(conn *connector.Connector, bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		roomID := chi.URLParam(r, "id")
 		var req InviteRequest
@@ -449,6 +469,16 @@ func InviteMember(conn *connector.Connector, bundler store.Bundler, recorder *au
 			WriteError(w, err)
 			return
 		}
+		// Only publish to the target when the new membership is
+		// subscribed (M5-P3-003 fix). Unsubscribed memberships are
+		// secondary-state (旁观) per requirements §4 / §5.2.1 and
+		// must not push to the target's primary watch stream. The
+		// target will see the room appear once they call
+		// PATCH /v1/memberships/{room_id} to subscribe — that path
+		// already publishes via UpdateMembership.
+		if req.Subscribed {
+			bus.Publish(req.AccountID)
+		}
 		WriteJSON(w, http.StatusCreated, MembershipToResponse(membership))
 	}
 }
@@ -471,7 +501,7 @@ func InviteMember(conn *connector.Connector, bundler store.Bundler, recorder *au
 //
 // A target whose bot_user_id was never captured (never came online)
 // has no Discord-side override to remove — that case skips step 2.
-func KickMember(conn *connector.Connector, bundler store.Bundler, recorder *audit.Recorder) http.HandlerFunc {
+func KickMember(conn *connector.Connector, bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		roomID := chi.URLParam(r, "id")
 		targetID := chi.URLParam(r, "account_id")
@@ -526,6 +556,8 @@ func KickMember(conn *connector.Connector, bundler store.Bundler, recorder *audi
 			WriteError(w, err)
 			return
 		}
+		// Target lost a membership → their state changes.
+		bus.Publish(targetID)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -575,7 +607,7 @@ func ListMembers(bundler store.Bundler) http.HandlerFunc {
 // UpdateMembership handles PATCH /v1/memberships/{room_id}. Available
 // to authenticated users; lets a member toggle their own subscribed
 // flag (requirements §4 rule 4).
-func UpdateMembership(bundler store.Bundler, recorder *audit.Recorder) http.HandlerFunc {
+func UpdateMembership(bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		roomID := chi.URLParam(r, "room_id")
 		var req UpdateMembershipRequest
@@ -609,6 +641,9 @@ func UpdateMembership(bundler store.Bundler, recorder *audit.Recorder) http.Hand
 			WriteError(w, err)
 			return
 		}
+		// Actor's subscribed flag changed → their primary/secondary
+		// state UI partition shifts.
+		bus.Publish(actor.ID)
 		WriteJSON(w, http.StatusOK, MembershipToResponse(updated))
 	}
 }

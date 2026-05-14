@@ -27,6 +27,7 @@ import (
 	"github.com/LinZiyang666/agentchat/internal/crypto"
 	"github.com/LinZiyang666/agentchat/internal/errcode"
 	"github.com/LinZiyang666/agentchat/internal/message"
+	"github.com/LinZiyang666/agentchat/internal/state"
 	"github.com/LinZiyang666/agentchat/internal/store/sqlite"
 )
 
@@ -112,10 +113,19 @@ func runServe(ctx context.Context) error {
 	}, log)
 	defer conn.Shutdown(context.Background())
 
+	// M5 state-fan-out engine. The aggregator depends on the Bundle
+	// + a Connector.Status reader for the health bar; the bus owns
+	// the version counter, debouncer, and subscriber set.
+	agg := state.NewFromConnector(db.Bundle(), conn)
+	stateBus := state.NewBus(agg, log)
+	defer stateBus.Shutdown()
+
 	// M4 inbound-message ingester. Drained by per-account background
 	// goroutines that the OnlineAccount handler attaches on success
-	// and OfflineAccount detaches on teardown.
-	ingester := message.New(conn, db, log)
+	// and OfflineAccount detaches on teardown. The ingester also
+	// publishes to the state bus so watchers see new inbound
+	// messages.
+	ingester := message.New(conn, db, log, stateBus)
 
 	if err := bootstrapRoot(ctx, accountSvc, authMgr); err != nil {
 		return err
@@ -146,6 +156,7 @@ func runServe(ctx context.Context) error {
 		Connector:   conn,
 		MasterKey:   masterKey,
 		Ingester:    ingester,
+		StateBus:    stateBus,
 	})
 
 	srv := &http.Server{

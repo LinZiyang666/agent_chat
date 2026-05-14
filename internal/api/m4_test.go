@@ -77,7 +77,7 @@ func newM4Env(t *testing.T) *m4Env {
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { env.conn.Shutdown(context.Background()) })
 
-	env.ingester = message.New(env.conn, s, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	env.ingester = message.New(env.conn, s, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	router := NewRouter(Deps{
 		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),

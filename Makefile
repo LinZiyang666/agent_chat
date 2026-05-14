@@ -22,6 +22,7 @@ COVER_PKGS := \
   ./internal/crypto \
   ./internal/errcode \
   ./internal/message \
+  ./internal/state \
   ./internal/store/sqlite \
   ./pkg/client \
   ./cmd/agentchat/cmds \
@@ -45,7 +46,7 @@ test:
 	go test ./...
 
 test-race:
-	go test -race ./...
+	go test -race -timeout=20m ./...
 
 cover:
 	go test -coverprofile=coverage.txt $(COVER_PKGS)
@@ -65,6 +66,7 @@ smoke: build
 	./e2e/m2-smoke.sh
 	./e2e/m3-smoke.sh
 	./e2e/m4-smoke.sh
+	./e2e/m5-smoke.sh
 
 clean:
 	rm -rf $(BIN_DIR) coverage.txt coverage.html

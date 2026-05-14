@@ -53,11 +53,23 @@ type MembershipRepo interface {
 	Get(ctx context.Context, accountID, roomID string) (*Membership, error)
 	ListByRoom(ctx context.Context, roomID string) ([]*Membership, error)
 	ListByAccount(ctx context.Context, accountID string) ([]*Membership, error)
+	// ListByAccountWithRooms returns one row per membership joined
+	// with the corresponding room. Used by the M5 aggregator to
+	// avoid N+1 Rooms.Get calls (M5-P3-006 fix). The result is
+	// ordered by joined_at ASC (matching ListByAccount).
+	ListByAccountWithRooms(ctx context.Context, accountID string) ([]*MembershipWithRoom, error)
 	// ListSubscribers returns members of roomID whose subscribed flag
 	// is true. Used by the ingester to fan out new message_states.
 	ListSubscribers(ctx context.Context, roomID string) ([]*Membership, error)
 	SetSubscribed(ctx context.Context, accountID, roomID string, subscribed bool) error
 	Delete(ctx context.Context, accountID, roomID string) error
+}
+
+// MembershipWithRoom is the joined view used by
+// MembershipRepo.ListByAccountWithRooms.
+type MembershipWithRoom struct {
+	Membership *Membership
+	Room       *Room
 }
 
 // MessageRepo persists Message rows.
@@ -82,6 +94,11 @@ type MessageRepo interface {
 	// through history can reverse client-side if they want
 	// chronological reading order.
 	List(ctx context.Context, f MessageFilter) ([]*Message, error)
+	// LatestPerRoomForMember returns the most recent message in each
+	// non-archived room the account is a member of (subscribed or
+	// not). Used by the M5 aggregator's "recently active" dimension.
+	// Rooms with no messages at all are omitted from the map.
+	LatestPerRoomForMember(ctx context.Context, accountID string) (map[string]*Message, error)
 	// ApplySendMetadata writes back agentchat-local metadata onto an
 	// existing message row. This is the M4-P3-010 fix: when the send
 	// path loses the discord_msg_id INSERT race to the ingester (which
@@ -111,6 +128,49 @@ type MessageStateRepo interface {
 	Upsert(ctx context.Context, s *MessageState) error
 	Get(ctx context.Context, messageID, accountID string) (*MessageState, error)
 	ListByAccount(ctx context.Context, accountID string) ([]*MessageState, error)
+
+	// M5 state-aggregator read paths. All are scoped to the
+	// caller's *subscribed and non-archived* rooms — per
+	// requirements §5.2.1 the primary state UI aggregates
+	// "属 + 已订阅" rooms only, and archived rooms are not active
+	// chat surfaces (M5-P3-001 fix).
+	//
+	// Totals queries (Count*) and feed queries (List*) are split
+	// (M5-P3-002 fix): the feed APIs cap at `limit` for display,
+	// but Totals must reflect the full unbounded count.
+
+	// CountUnreadForSubscribed returns the total number of
+	// message_state rows whose read_at IS NULL and whose room is
+	// subscribed and not archived.
+	CountUnreadForSubscribed(ctx context.Context, accountID string) (int, error)
+	// CountMentionsForSubscribed counts unread messages in
+	// subscribed non-archived rooms whose content contains the
+	// literal "<@botUserID>" mention token. Used for
+	// Totals.Mentions (the visible feed is capped via
+	// ListMentionsForSubscribed).
+	CountMentionsForSubscribed(ctx context.Context, accountID, botUserID string) (int, error)
+	// CountPendingAcksForSubscribed counts requires_ack messages
+	// in subscribed non-archived rooms whose replied_at IS NULL.
+	CountPendingAcksForSubscribed(ctx context.Context, accountID string) (int, error)
+	// CountPriorityForSubscribed counts unread urgent+system
+	// messages in subscribed non-archived rooms.
+	CountPriorityForSubscribed(ctx context.Context, accountID string) (int, error)
+	// UnreadCountByRoomForSubscribed returns a roomID -> unread
+	// count map for the account's subscribed non-archived rooms.
+	UnreadCountByRoomForSubscribed(ctx context.Context, accountID string) (map[string]int, error)
+	// ListMentionsForSubscribed returns unread messages in subscribed
+	// non-archived rooms whose content contains the literal
+	// "<@botUserID>" mention token. Newest-first, capped at limit
+	// (default 50). Counters for Totals use CountMentionsForSubscribed.
+	ListMentionsForSubscribed(ctx context.Context, accountID, botUserID string, limit int) ([]*Message, error)
+	// ListPendingAcksForSubscribed returns messages in subscribed
+	// non-archived rooms with requires_ack=1 whose state.replied_at
+	// IS NULL. Newest-first, capped at limit.
+	ListPendingAcksForSubscribed(ctx context.Context, accountID string, limit int) ([]*Message, error)
+	// ListPriorityForSubscribed returns unread messages in subscribed
+	// non-archived rooms whose priority is 'urgent' or 'system'.
+	// Newest-first, capped at limit.
+	ListPriorityForSubscribed(ctx context.Context, accountID string, limit int) ([]*Message, error)
 }
 
 // Bundle aggregates the repositories the daemon uses. Backends

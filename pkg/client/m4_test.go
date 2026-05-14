@@ -75,7 +75,7 @@ func startM4TestDaemon(t *testing.T) (sock, token string, latest func() *mock.Pr
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { conn.Shutdown(context.Background()) })
 
-	ing := message.New(conn, s, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ing := message.New(conn, s, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	router := api.NewRouter(api.Deps{
 		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),

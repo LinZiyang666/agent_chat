@@ -511,3 +511,50 @@ func (c *Client) ReplyAckMessage(ctx context.Context, messageID string) (*apiv1.
 	}
 	return &out, nil
 }
+
+// M5 — state view.
+
+// GetState fetches a one-shot Snapshot of the caller's state. The
+// returned value is a raw map; callers that want typed access should
+// import internal/state directly (CLI does this through JSON
+// round-trip).
+func (c *Client) GetState(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	if err := c.do(ctx, http.MethodGet, "/v1/state", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// WatchState opens the NDJSON state stream. The returned io.ReadCloser
+// must be closed by the caller; closing the request context also
+// terminates the stream.
+func (c *Client) WatchState(ctx context.Context) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/state/watch", nil)
+	if err != nil {
+		return nil, errcode.Wrap(err, errcode.Internal, "build request")
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	// Streaming endpoint — bypass any per-request timeout.
+	streamClient := &http.Client{Transport: c.httpClient.Transport}
+	resp, err := streamClient.Do(req)
+	if err != nil {
+		return nil, errcode.Wrap(err, errcode.Unavailable, "open state stream")
+	}
+	if resp.StatusCode >= 400 {
+		var env apiv1.ErrorEnvelope
+		raw, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if jerr := json.Unmarshal(raw, &env); jerr == nil && env.Error.Code != "" {
+			return nil, (&errcode.Error{
+				Code:    errcode.Code(env.Error.Code),
+				Message: env.Error.Message,
+			}).WithDetails(env.Error.Details)
+		}
+		return nil, errcode.New(errcode.Internal,
+			"daemon returned HTTP %d on state stream open: %s", resp.StatusCode, string(raw))
+	}
+	return resp.Body, nil
+}

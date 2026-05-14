@@ -38,7 +38,7 @@ func newFixture(t *testing.T) *fixture {
 	return &fixture{
 		t:     t,
 		store: s,
-		ing:   New(conn, s, slog.New(slog.NewTextHandler(io.Discard, nil))),
+		ing:   New(conn, s, slog.New(slog.NewTextHandler(io.Discard, nil)), nil),
 	}
 }
 

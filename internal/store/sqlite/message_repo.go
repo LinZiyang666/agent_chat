@@ -149,6 +149,52 @@ SELECT `+messageSelectCols+`
 	return out, nil
 }
 
+// LatestPerRoomForMember returns the latest message in each room the
+// account is a member of (subscribed or not). Used by the M5
+// aggregator's recently-active dimension.
+//
+// Self-audit Finding M-1 fix: the previous implementation used
+// `(room_id, MAX(created_at), MAX(id)) IN (...)` which evaluates
+// the two MAX aggregates independently — under same-millisecond
+// ties or any case where the row with MAX(id) is not the row with
+// MAX(created_at), the tuple wouldn't match any real row and the
+// room would silently drop out of the result. We now use a window
+// function (ROW_NUMBER OVER (PARTITION BY room_id ORDER BY ...))
+// which picks one concrete row per partition deterministically.
+func (r *messageRepo) LatestPerRoomForMember(ctx context.Context, accountID string) (map[string]*store.Message, error) {
+	rows, err := r.db.QueryContext(ctx, `
+WITH ranked AS (
+  SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
+         m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash,
+         ROW_NUMBER() OVER (PARTITION BY m.room_id ORDER BY m.created_at DESC, m.id DESC) AS rn
+    FROM messages m
+    JOIN memberships mb ON mb.room_id = m.room_id
+    JOIN rooms       rm ON rm.id = m.room_id
+   WHERE mb.account_id = ?
+     AND rm.archived = 0
+)
+SELECT id, room_id, author_account_id, discord_msg_id, content,
+       reply_to_msg_id, requires_ack, priority, created_at, content_hash
+  FROM ranked
+ WHERE rn = 1`, accountID)
+	if err != nil {
+		return nil, errcode.Wrap(err, errcode.Internal, "latest per room for member")
+	}
+	defer rows.Close()
+	out := map[string]*store.Message{}
+	for rows.Next() {
+		m, err := scanMessageRow(rows)
+		if err != nil {
+			return nil, errcode.Wrap(err, errcode.Internal, "scan latest row")
+		}
+		out[m.RoomID] = m
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errcode.Wrap(err, errcode.Internal, "iterate latest rows")
+	}
+	return out, nil
+}
+
 // ApplySendMetadata writes the send-path-owned columns onto an existing
 // row. Used by the M4-P3-010 race fix in SendMessage.
 func (r *messageRepo) ApplySendMetadata(ctx context.Context, id string, m store.SendMetadata) error {

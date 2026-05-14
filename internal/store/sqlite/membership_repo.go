@@ -69,6 +69,54 @@ func (r *membershipRepo) ListByAccount(ctx context.Context, accountID string) ([
 		accountID)
 }
 
+// ListByAccountWithRooms returns one row per membership joined with
+// the corresponding room — replaces the M5 aggregator's N+1
+// Rooms.Get loop (M5-P3-006 fix).
+func (r *membershipRepo) ListByAccountWithRooms(ctx context.Context, accountID string) ([]*store.MembershipWithRoom, error) {
+	rows, err := r.db.QueryContext(ctx, `
+SELECT mb.account_id, mb.room_id, mb.subscribed, mb.joined_at,
+       rm.id, rm.discord_channel_id, rm.name, rm.archived, rm.created_at, rm.updated_at
+  FROM memberships mb
+  JOIN rooms       rm ON rm.id = mb.room_id
+ WHERE mb.account_id = ?
+ ORDER BY mb.joined_at ASC`, accountID)
+	if err != nil {
+		return nil, errcode.Wrap(err, errcode.Internal, "list memberships with rooms")
+	}
+	defer rows.Close()
+	var out []*store.MembershipWithRoom
+	for rows.Next() {
+		var (
+			m          store.Membership
+			subscribed int
+			joinedAt   int64
+			room       store.Room
+			archived   int
+			rCreatedAt int64
+			rUpdatedAt int64
+		)
+		if err := rows.Scan(
+			&m.AccountID, &m.RoomID, &subscribed, &joinedAt,
+			&room.ID, &room.DiscordChannelID, &room.Name, &archived, &rCreatedAt, &rUpdatedAt,
+		); err != nil {
+			return nil, errcode.Wrap(err, errcode.Internal, "scan membership+room row")
+		}
+		m.Subscribed = subscribed != 0
+		m.JoinedAt = time.Unix(joinedAt, 0).UTC()
+		room.Archived = archived != 0
+		room.CreatedAt = time.Unix(rCreatedAt, 0).UTC()
+		room.UpdatedAt = time.Unix(rUpdatedAt, 0).UTC()
+		out = append(out, &store.MembershipWithRoom{
+			Membership: &m,
+			Room:       &room,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errcode.Wrap(err, errcode.Internal, "iterate memberships+rooms")
+	}
+	return out, nil
+}
+
 func (r *membershipRepo) ListSubscribers(ctx context.Context, roomID string) ([]*store.Membership, error) {
 	return r.listWhere(ctx,
 		`SELECT account_id, room_id, subscribed, joined_at

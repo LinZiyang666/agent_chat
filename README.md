@@ -11,12 +11,12 @@ TTY-friendly fallbacks for humans.
 
 ## Status
 
-Early development. M4 (rooms + messages) is the current milestone —
-Phase 1+2 complete (rooms 1:1 with Discord channels, three-state
-memberships, message send/history/read/reply-ack, background inbound
-ingester); awaiting user-driven Phase 3 audit and the real-Discord
-demo. M3 (Bot abstraction + Discord adapter + lifecycle) closed
-2026-05-14. See `docs/04-roadmap.md` for the full plan.
+Early development. M5 (state aggregation engine + `watch state`
+NDJSON stream + 8-dimension Snapshot per requirements §5.2, 200 ms
+debounce, idle streams byte-quiet) closed 2026-05-14. M4 (rooms +
+messages) closed 2026-05-14. M3 (Bot abstraction + Discord adapter +
+lifecycle) closed 2026-05-14. M6 (announcements) is next — see
+`docs/04-roadmap.md` §7.
 
 ## Components
 
@@ -42,7 +42,7 @@ make build
 make test          # all packages
 make test-race     # with race detector
 make cover         # coverage summary (code-bearing packages only)
-make smoke         # end-to-end smoke tests (M1 + M2 + M3 + M4)
+make smoke         # end-to-end smoke tests (M1 + M2 + M3 + M4 + M5)
 ```
 
 ## Documentation

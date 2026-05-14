@@ -24,7 +24,7 @@ func TestIngesterAttachIsIdempotent(t *testing.T) {
 		return nil
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	ing := New(conn, nopBundler{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ing := New(conn, nopBundler{}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	// No Provider is needed to subscribe — Subscribe just registers a
 	// channel under the account's slot in the Connector.
@@ -47,7 +47,7 @@ func TestIngesterDetachWithoutAttachIsNoOp(t *testing.T) {
 	conn := connector.New(func(_ string, _ bot.Identity) bot.Provider {
 		return nil
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ing := New(conn, nopBundler{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ing := New(conn, nopBundler{}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	ing.DetachAccount("never-attached")
 	assert.False(t, ing.IsAttached("never-attached"))

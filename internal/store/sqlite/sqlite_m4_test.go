@@ -408,6 +408,38 @@ func TestMessageApplySendMetadata(t *testing.T) {
 	assert.Equal(t, errcode.NotFound, ec.Code)
 }
 
+func TestLatestPerRoomForMemberHandlesSameTimestampTieBreak(t *testing.T) {
+	// Regression for M5 self-audit Finding M-1: the prior groupwise-
+	// max idiom could silently drop a room when MAX(id) and
+	// MAX(created_at) named different rows. The window-function
+	// rewrite picks ONE row per partition deterministically, ordered
+	// by (created_at DESC, id DESC) — same as the messages list
+	// ordering.
+	s := newM4Store(t)
+	r := mustCreateRoom(t, s, "r", "ch")
+	a := mustCreateAccount(t, s, "u")
+	require.NoError(t, s.Bundle().Memberships.Upsert(context.Background(), &store.Membership{
+		AccountID: a.ID, RoomID: r.ID, Subscribed: true, JoinedAt: time.Now().UTC(),
+	}))
+	// Two messages with the SAME created_at; different ids.
+	sameTs := time.Unix(1700000000, 0).UTC()
+	idLo := "00000000-0000-7000-8000-000000000001"
+	idHi := "00000000-0000-7000-8000-000000000002"
+	for _, m := range []*store.Message{
+		{ID: idLo, RoomID: r.ID, DiscordMsgID: "dm-lo", Content: "lo",
+			Priority: store.PriorityNormal, CreatedAt: sameTs, ContentHash: "h"},
+		{ID: idHi, RoomID: r.ID, DiscordMsgID: "dm-hi", Content: "hi",
+			Priority: store.PriorityNormal, CreatedAt: sameTs, ContentHash: "h"},
+	} {
+		require.NoError(t, s.Bundle().Messages.Create(context.Background(), m))
+	}
+	got, err := s.Bundle().Messages.LatestPerRoomForMember(context.Background(), a.ID)
+	require.NoError(t, err)
+	require.Contains(t, got, r.ID, "room must be present in result")
+	assert.Equal(t, idHi, got[r.ID].ID,
+		"newest-by-id tie-break must pick the higher id when timestamps match")
+}
+
 func TestMessageStateListByAccount(t *testing.T) {
 	s := newM4Store(t)
 	r := mustCreateRoom(t, s, "r", "ch")

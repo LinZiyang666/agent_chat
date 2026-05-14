@@ -21,6 +21,7 @@ import (
 	"github.com/LinZiyang666/agentchat/internal/bot"
 	"github.com/LinZiyang666/agentchat/internal/connector"
 	"github.com/LinZiyang666/agentchat/internal/errcode"
+	"github.com/LinZiyang666/agentchat/internal/state"
 	"github.com/LinZiyang666/agentchat/internal/store"
 )
 
@@ -32,14 +33,17 @@ type Ingester struct {
 	conn    *connector.Connector
 	bundler store.Bundler
 	log     *slog.Logger
+	bus     *state.Bus
 
 	mu       sync.Mutex
 	attached map[string]*connector.Subscription
 }
 
 // New constructs an Ingester. Call AttachAccount each time an account
-// successfully goes online.
-func New(conn *connector.Connector, bundler store.Bundler, log *slog.Logger) *Ingester {
+// successfully goes online. bus may be nil for older test rigs (M3/M4)
+// that don't wire the state engine; the ingester's Publish calls
+// short-circuit via Bus.Publish's nil-safe check.
+func New(conn *connector.Connector, bundler store.Bundler, log *slog.Logger, bus *state.Bus) *Ingester {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -47,6 +51,7 @@ func New(conn *connector.Connector, bundler store.Bundler, log *slog.Logger) *In
 		conn:     conn,
 		bundler:  bundler,
 		log:      log,
+		bus:      bus,
 		attached: map[string]*connector.Subscription{},
 	}
 }
@@ -128,7 +133,17 @@ func (i *Ingester) ingestNew(ingesterAccountID string, e bot.EventMessageNew) er
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	return i.bundler.WithTx(ctx, func(b store.Bundle) error {
+	// notify is populated inside the tx with the member ids that
+	// should receive a state-update publish AFTER the tx commits.
+	// Capturing it outside the closure ensures the Publish call
+	// only fires on a successful commit (self-audit Finding M-2:
+	// the previous version published inside the closure even though
+	// the comment claimed "Done AFTER the tx"; this aligns code and
+	// comment, and avoids scheduling rebuilds for rolled-back txs).
+	var notify []string
+
+	if err := i.bundler.WithTx(ctx, func(b store.Bundle) error {
+		notify = nil // reset across retries (if any future bundler retries)
 		room, err := b.Rooms.GetByDiscordChannelID(ctx, e.Message.ChannelID)
 		if err != nil {
 			if ec, _ := errcode.As(err); ec != nil && ec.Code == errcode.NotFound {
@@ -193,6 +208,7 @@ func (i *Ingester) ingestNew(ingesterAccountID string, e bot.EventMessageNew) er
 			return err
 		}
 		nowPtr := func() *time.Time { t := time.Now().UTC(); return &t }
+		ids := make([]string, 0, len(members))
 		for _, m := range members {
 			st := &store.MessageState{
 				MessageID: persistedID,
@@ -204,9 +220,18 @@ func (i *Ingester) ingestNew(ingesterAccountID string, e bot.EventMessageNew) er
 			if err := b.MessageStates.Upsert(ctx, st); err != nil {
 				return err
 			}
+			ids = append(ids, m.AccountID)
 		}
+		notify = ids
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+
+	// M5 state fan-out — runs ONLY after a successful tx commit so
+	// watchers never see a rebuild triggered by a rolled-back write.
+	i.bus.PublishMany(notify)
+	return nil
 }
 
 // resolveAuthor looks up the bot account whose bot_user_id matches
