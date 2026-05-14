@@ -11,10 +11,12 @@ TTY-friendly fallbacks for humans.
 
 ## Status
 
-Early development. M3 (Bot abstraction layer + Discord adapter) is the
-current milestone — Phase 1+2 complete with all Phase 3 audit findings
-remediated; real-Discord verification + final commit pending. M4
-(rooms + messages) is next. See `docs/04-roadmap.md` for the full plan.
+Early development. M4 (rooms + messages) is the current milestone —
+Phase 1+2 complete (rooms 1:1 with Discord channels, three-state
+memberships, message send/history/read/reply-ack, background inbound
+ingester); awaiting user-driven Phase 3 audit and the real-Discord
+demo. M3 (Bot abstraction + Discord adapter + lifecycle) closed
+2026-05-14. See `docs/04-roadmap.md` for the full plan.
 
 ## Components
 
@@ -40,7 +42,7 @@ make build
 make test          # all packages
 make test-race     # with race detector
 make cover         # coverage summary (code-bearing packages only)
-make smoke         # end-to-end smoke tests (M1 + M2 + M3)
+make smoke         # end-to-end smoke tests (M1 + M2 + M3 + M4)
 ```
 
 ## Documentation

@@ -29,12 +29,27 @@ type Config struct {
 	KeyPath string `toml:"key_path"`
 	// Log is the logging configuration block.
 	Log LogConfig `toml:"log"`
+	// Discord is the Discord-backend configuration block. Optional in
+	// M3 (lifecycle only); required by M4 once a room is created
+	// (rooms need a guild_id to live in).
+	Discord DiscordConfig `toml:"discord"`
 }
 
 // LogConfig configures the daemon's slog output.
 type LogConfig struct {
 	// Level is one of "debug", "info", "warn", "error".
 	Level string `toml:"level"`
+}
+
+// DiscordConfig configures the Discord adapter. Per requirements §3.2,
+// agentchat targets a single Discord guild — multi-guild is explicitly
+// out of scope.
+type DiscordConfig struct {
+	// GuildID is the Discord guild that all agentchat rooms live in.
+	// Empty means "not configured": online still works, but room.create
+	// (and any other guild-scoped operation) fails with InvalidArgument
+	// until set.
+	GuildID string `toml:"guild_id"`
 }
 
 const (
@@ -44,6 +59,8 @@ const (
 	EnvSocket = "AGENTCHAT_SOCKET"
 	// EnvLogLevel overrides Log.Level.
 	EnvLogLevel = "AGENTCHAT_LOG_LEVEL"
+	// EnvDiscordGuildID overrides Discord.GuildID.
+	EnvDiscordGuildID = "AGENTCHAT_DISCORD_GUILD_ID"
 
 	// configFileName is the TOML config file expected inside DataRoot.
 	configFileName = "config.toml"
@@ -128,6 +145,9 @@ func Load(dataRoot string) (Config, error) {
 		if overlay.Log.Level != "" {
 			cfg.Log.Level = overlay.Log.Level
 		}
+		if overlay.Discord.GuildID != "" {
+			cfg.Discord.GuildID = overlay.Discord.GuildID
+		}
 	}
 
 	// Env wins over defaults and TOML.
@@ -136,6 +156,9 @@ func Load(dataRoot string) (Config, error) {
 	}
 	if v := os.Getenv(EnvLogLevel); v != "" {
 		cfg.Log.Level = v
+	}
+	if v := os.Getenv(EnvDiscordGuildID); v != "" {
+		cfg.Discord.GuildID = v
 	}
 
 	if err := cfg.finalize(); err != nil {

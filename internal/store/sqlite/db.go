@@ -61,12 +61,16 @@ func (s *Store) Close() error { return s.db.Close() }
 // (currently: tests). Production code must go through Bundle().
 func (s *Store) DB() *sql.DB { return s.db }
 
-// Bundle returns the three repositories wired to this Store.
+// Bundle returns the repositories wired to this Store.
 func (s *Store) Bundle() store.Bundle {
 	return store.Bundle{
-		Accounts: &accountRepo{db: s.db},
-		Tokens:   &tokenRepo{db: s.db},
-		Audit:    &auditRepo{db: s.db},
+		Accounts:      &accountRepo{db: s.db},
+		Tokens:        &tokenRepo{db: s.db},
+		Audit:         &auditRepo{db: s.db},
+		Rooms:         &roomRepo{db: s.db},
+		Memberships:   &membershipRepo{db: s.db},
+		Messages:      &messageRepo{db: s.db},
+		MessageStates: &messageStateRepo{db: s.db},
 	}
 }
 
@@ -98,9 +102,13 @@ func (s *Store) WithTx(ctx context.Context, fn func(b store.Bundle) error) error
 	defer func() { _ = tx.Rollback() }()
 
 	txBundle := store.Bundle{
-		Accounts: &accountRepo{db: tx},
-		Tokens:   &tokenRepo{db: tx},
-		Audit:    &auditRepo{db: tx},
+		Accounts:      &accountRepo{db: tx},
+		Tokens:        &tokenRepo{db: tx},
+		Audit:         &auditRepo{db: tx},
+		Rooms:         &roomRepo{db: tx},
+		Memberships:   &membershipRepo{db: tx},
+		Messages:      &messageRepo{db: tx},
+		MessageStates: &messageStateRepo{db: tx},
 	}
 	if err := fn(txBundle); err != nil {
 		return err

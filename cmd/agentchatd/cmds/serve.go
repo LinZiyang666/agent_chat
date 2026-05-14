@@ -26,6 +26,7 @@ import (
 	"github.com/LinZiyang666/agentchat/internal/connector"
 	"github.com/LinZiyang666/agentchat/internal/crypto"
 	"github.com/LinZiyang666/agentchat/internal/errcode"
+	"github.com/LinZiyang666/agentchat/internal/message"
 	"github.com/LinZiyang666/agentchat/internal/store/sqlite"
 )
 
@@ -105,9 +106,16 @@ func runServe(ctx context.Context) error {
 	// Discord-backed Provider factory; future Matrix/Slack adapters
 	// would swap this in test or via config.
 	conn := connector.New(func(token string, hint bot.Identity) bot.Provider {
-		return discord.New(token, hint, discord.Options{})
+		return discord.New(token, hint, discord.Options{
+			GuildID: cfg.Discord.GuildID,
+		})
 	}, log)
 	defer conn.Shutdown(context.Background())
+
+	// M4 inbound-message ingester. Drained by per-account background
+	// goroutines that the OnlineAccount handler attaches on success
+	// and OfflineAccount detaches on teardown.
+	ingester := message.New(conn, db, log)
 
 	if err := bootstrapRoot(ctx, accountSvc, authMgr); err != nil {
 		return err
@@ -137,6 +145,7 @@ func runServe(ctx context.Context) error {
 		Bundler:     db, // *sqlite.Store implements store.Bundler
 		Connector:   conn,
 		MasterKey:   masterKey,
+		Ingester:    ingester,
 	})
 
 	srv := &http.Server{

@@ -14,6 +14,7 @@ import (
 	"github.com/LinZiyang666/agentchat/internal/connector"
 	"github.com/LinZiyang666/agentchat/internal/crypto"
 	"github.com/LinZiyang666/agentchat/internal/errcode"
+	"github.com/LinZiyang666/agentchat/internal/message"
 	"github.com/LinZiyang666/agentchat/internal/store"
 )
 
@@ -95,6 +96,7 @@ func SetDiscord(svc *account.Service, bundler store.Bundler, recorder *audit.Rec
 // disconnected so the in-memory and on-disk states do not diverge.
 func OnlineAccount(svc *account.Service, conn *connector.Connector,
 	bundler store.Bundler, recorder *audit.Recorder, masterKey []byte,
+	ingester *message.Ingester,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
@@ -122,6 +124,13 @@ func OnlineAccount(svc *account.Service, conn *connector.Connector,
 			WriteError(w, err)
 			return
 		}
+		// Capture the Discord-side identity for the inbound-message
+		// ingester's author resolution (M4). Identity() is valid now
+		// that Connect has returned.
+		var capturedUID string
+		if p, ok := conn.Provider(id); ok {
+			capturedUID = p.Identity().UserID
+		}
 		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {
 			a2, err := b.Accounts.Get(r.Context(), id)
 			if err != nil {
@@ -129,6 +138,9 @@ func OnlineAccount(svc *account.Service, conn *connector.Connector,
 			}
 			a2.LifecycleState = store.LifecycleOnline
 			a2.UpdatedAt = time.Now().UTC()
+			if capturedUID != "" {
+				a2.BotUserID = capturedUID
+			}
 			if err := b.Accounts.Update(r.Context(), a2); err != nil {
 				return err
 			}
@@ -139,6 +151,9 @@ func OnlineAccount(svc *account.Service, conn *connector.Connector,
 			_ = conn.Disconnect(context.Background(), id)
 			WriteError(w, err)
 			return
+		}
+		if ingester != nil {
+			ingester.AttachAccount(id)
 		}
 		writeStatusResponse(w, svc, conn, r.Context(), id)
 	}
@@ -158,6 +173,7 @@ func OnlineAccount(svc *account.Service, conn *connector.Connector,
 // online to begin with.
 func OfflineAccount(svc *account.Service, conn *connector.Connector,
 	bundler store.Bundler, recorder *audit.Recorder,
+	ingester *message.Ingester,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
@@ -187,8 +203,15 @@ func OfflineAccount(svc *account.Service, conn *connector.Connector,
 			WriteError(w, err)
 			return
 		}
-		// Tx committed; now tear down the in-memory Provider. If
-		// Disconnect itself fails the DB already says "offline", so
+		// Tx committed; detach the ingester (drops its event
+		// subscription) before tearing down the in-memory Provider.
+		// Disconnect would also close the subscription channel via the
+		// pump tail, but explicit Detach frees the slot promptly and
+		// is symmetric with AttachAccount.
+		if ingester != nil {
+			ingester.DetachAccount(id)
+		}
+		// If Disconnect itself fails the DB already says "offline", so
 		// the next online attempt will recover. We surface the
 		// disconnect error to the caller but the DB state is already
 		// consistent with the requested offline intent.

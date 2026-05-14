@@ -91,3 +91,91 @@ type AuditEntryResponse struct {
 type AuditListResponse struct {
 	Entries []AuditEntryResponse `json:"entries"`
 }
+
+// CreateRoomRequest is the body of POST /v1/rooms. The caller's token
+// determines the executor account (the bot that issues the
+// CreateChannel call), so the request body does not name it.
+type CreateRoomRequest struct {
+	Name string `json:"name"`
+}
+
+// UpdateRoomRequest is the body of PATCH /v1/rooms/{id}. Optional
+// fields are left unchanged when omitted.
+type UpdateRoomRequest struct {
+	Name *string `json:"name,omitempty"`
+}
+
+// RoomResponse is the public shape of a Room row.
+type RoomResponse struct {
+	ID               string    `json:"id"`
+	DiscordChannelID string    `json:"discord_channel_id"`
+	Name             string    `json:"name"`
+	Archived         bool      `json:"archived"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+// RoomListResponse is the body of GET /v1/rooms.
+type RoomListResponse struct {
+	Rooms []RoomResponse `json:"rooms"`
+}
+
+// InviteRequest is the body of POST /v1/rooms/{id}/members.
+type InviteRequest struct {
+	AccountID  string `json:"account_id"`
+	Subscribed bool   `json:"subscribed"`
+}
+
+// MembershipResponse is the public shape of a Membership row.
+type MembershipResponse struct {
+	AccountID  string    `json:"account_id"`
+	RoomID     string    `json:"room_id"`
+	Subscribed bool      `json:"subscribed"`
+	JoinedAt   time.Time `json:"joined_at"`
+}
+
+// MembershipListResponse is the body of GET /v1/rooms/{id}/members.
+type MembershipListResponse struct {
+	Members []MembershipResponse `json:"members"`
+}
+
+// UpdateMembershipRequest is the body of PATCH /v1/memberships/{room_id}.
+// Used by user self-service subscribe/unsubscribe.
+type UpdateMembershipRequest struct {
+	Subscribed bool `json:"subscribed"`
+}
+
+// SendMessageRequest is the body of POST /v1/rooms/{id}/messages.
+type SendMessageRequest struct {
+	Content     string `json:"content"`
+	ReplyToID   string `json:"reply_to_id,omitempty"`
+	RequiresAck bool   `json:"requires_ack,omitempty"`
+	Priority    string `json:"priority,omitempty"`
+}
+
+// MessageResponse is the public shape of a Message row.
+type MessageResponse struct {
+	ID              string    `json:"id"`
+	RoomID          string    `json:"room_id"`
+	AuthorAccountID string    `json:"author_account_id,omitempty"`
+	DiscordMsgID    string    `json:"discord_msg_id"`
+	Content         string    `json:"content"`
+	ReplyToMsgID    string    `json:"reply_to_msg_id,omitempty"`
+	RequiresAck     bool      `json:"requires_ack"`
+	Priority        string    `json:"priority"`
+	CreatedAt       time.Time `json:"created_at"`
+	ContentHash     string    `json:"content_hash"`
+}
+
+// MessageListResponse is the body of GET /v1/rooms/{id}/messages.
+type MessageListResponse struct {
+	Messages []MessageResponse `json:"messages"`
+}
+
+// MessageStateResponse is the public shape of a MessageState row.
+type MessageStateResponse struct {
+	MessageID string     `json:"message_id"`
+	AccountID string     `json:"account_id"`
+	ReadAt    *time.Time `json:"read_at,omitempty"`
+	RepliedAt *time.Time `json:"replied_at,omitempty"`
+}

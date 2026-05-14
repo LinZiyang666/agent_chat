@@ -25,10 +25,11 @@ func (r *accountRepo) Create(ctx context.Context, a *store.Account) error {
 		return errcode.New(errcode.InvalidArgument, "invalid lifecycle state: %q", a.LifecycleState)
 	}
 	_, err := r.db.ExecContext(ctx, `
-INSERT INTO accounts(id, name, role, lifecycle_state, bot_token_enc, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO accounts(id, name, role, lifecycle_state, bot_token_enc, bot_user_id, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.ID, a.Name, string(a.Role), string(a.LifecycleState),
-		a.BotTokenEnc, a.CreatedAt.Unix(), a.UpdatedAt.Unix(),
+		a.BotTokenEnc, nullableString(a.BotUserID),
+		a.CreatedAt.Unix(), a.UpdatedAt.Unix(),
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -42,13 +43,13 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`,
 
 func (r *accountRepo) Get(ctx context.Context, id string) (*store.Account, error) {
 	return r.fetchOne(ctx,
-		`SELECT id, name, role, lifecycle_state, bot_token_enc, created_at, updated_at
+		`SELECT id, name, role, lifecycle_state, bot_token_enc, bot_user_id, created_at, updated_at
 		 FROM accounts WHERE id = ?`, id)
 }
 
 func (r *accountRepo) GetByName(ctx context.Context, name string) (*store.Account, error) {
 	return r.fetchOne(ctx,
-		`SELECT id, name, role, lifecycle_state, bot_token_enc, created_at, updated_at
+		`SELECT id, name, role, lifecycle_state, bot_token_enc, bot_user_id, created_at, updated_at
 		 FROM accounts WHERE name = ?`, name)
 }
 
@@ -57,9 +58,10 @@ func (r *accountRepo) fetchOne(ctx context.Context, query string, arg string) (*
 	var (
 		a              store.Account
 		role, state    string
+		botUserID      sql.NullString
 		createdAt, upd int64
 	)
-	err := row.Scan(&a.ID, &a.Name, &role, &state, &a.BotTokenEnc, &createdAt, &upd)
+	err := row.Scan(&a.ID, &a.Name, &role, &state, &a.BotTokenEnc, &botUserID, &createdAt, &upd)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errcode.New(errcode.NotFound, "account not found")
 	}
@@ -68,6 +70,7 @@ func (r *accountRepo) fetchOne(ctx context.Context, query string, arg string) (*
 	}
 	a.Role = store.Role(role)
 	a.LifecycleState = store.LifecycleState(state)
+	a.BotUserID = fromNullableString(botUserID)
 	a.CreatedAt = time.Unix(createdAt, 0).UTC()
 	a.UpdatedAt = time.Unix(upd, 0).UTC()
 	return &a, nil
@@ -75,7 +78,7 @@ func (r *accountRepo) fetchOne(ctx context.Context, query string, arg string) (*
 
 func (r *accountRepo) List(ctx context.Context) ([]*store.Account, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, name, role, lifecycle_state, bot_token_enc, created_at, updated_at
+		`SELECT id, name, role, lifecycle_state, bot_token_enc, bot_user_id, created_at, updated_at
 		 FROM accounts ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, errcode.Wrap(err, errcode.Internal, "list accounts")
@@ -87,13 +90,15 @@ func (r *accountRepo) List(ctx context.Context) ([]*store.Account, error) {
 		var (
 			a              store.Account
 			role, state    string
+			botUserID      sql.NullString
 			createdAt, upd int64
 		)
-		if err := rows.Scan(&a.ID, &a.Name, &role, &state, &a.BotTokenEnc, &createdAt, &upd); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &role, &state, &a.BotTokenEnc, &botUserID, &createdAt, &upd); err != nil {
 			return nil, errcode.Wrap(err, errcode.Internal, "scan account row")
 		}
 		a.Role = store.Role(role)
 		a.LifecycleState = store.LifecycleState(state)
+		a.BotUserID = fromNullableString(botUserID)
 		a.CreatedAt = time.Unix(createdAt, 0).UTC()
 		a.UpdatedAt = time.Unix(upd, 0).UTC()
 		out = append(out, &a)
@@ -116,9 +121,11 @@ func (r *accountRepo) Update(ctx context.Context, a *store.Account) error {
 	}
 	res, err := r.db.ExecContext(ctx, `
 UPDATE accounts
-   SET name = ?, role = ?, lifecycle_state = ?, bot_token_enc = ?, updated_at = ?
+   SET name = ?, role = ?, lifecycle_state = ?, bot_token_enc = ?, bot_user_id = ?, updated_at = ?
  WHERE id = ?`,
-		a.Name, string(a.Role), string(a.LifecycleState), a.BotTokenEnc, a.UpdatedAt.Unix(), a.ID,
+		a.Name, string(a.Role), string(a.LifecycleState),
+		a.BotTokenEnc, nullableString(a.BotUserID),
+		a.UpdatedAt.Unix(), a.ID,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {

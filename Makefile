@@ -21,6 +21,7 @@ COVER_PKGS := \
   ./internal/connector \
   ./internal/crypto \
   ./internal/errcode \
+  ./internal/message \
   ./internal/store/sqlite \
   ./pkg/client \
   ./cmd/agentchat/cmds \
@@ -63,6 +64,7 @@ smoke: build
 	./e2e/m1-smoke.sh
 	./e2e/m2-smoke.sh
 	./e2e/m3-smoke.sh
+	./e2e/m4-smoke.sh
 
 clean:
 	rm -rf $(BIN_DIR) coverage.txt coverage.html

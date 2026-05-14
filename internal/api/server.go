@@ -12,6 +12,7 @@ import (
 	"github.com/LinZiyang666/agentchat/internal/audit"
 	"github.com/LinZiyang666/agentchat/internal/auth"
 	"github.com/LinZiyang666/agentchat/internal/connector"
+	"github.com/LinZiyang666/agentchat/internal/message"
 	"github.com/LinZiyang666/agentchat/internal/store"
 )
 
@@ -35,6 +36,11 @@ type Deps struct {
 	// MasterKey is the AES-GCM key used to encrypt/decrypt bot tokens
 	// at rest. Loaded from disk by the daemon.
 	MasterKey []byte
+	// Ingester is the M4 inbound-message ingester. OnlineAccount
+	// attaches an account to it after a successful Connect; the
+	// background goroutine writes message rows + per-subscriber state
+	// inside bundler.WithTx.
+	Ingester *message.Ingester
 }
 
 // NewRouter builds the chi router with the full /v1 surface. Returned
@@ -76,16 +82,35 @@ func NewRouter(d Deps) http.Handler {
 				r.Post("/accounts/{id}/discord",
 					apiv1.SetDiscord(d.Accounts, d.Bundler, d.Audit, d.MasterKey))
 				r.Post("/accounts/{id}/online",
-					apiv1.OnlineAccount(d.Accounts, d.Connector, d.Bundler, d.Audit, d.MasterKey))
+					apiv1.OnlineAccount(d.Accounts, d.Connector, d.Bundler, d.Audit, d.MasterKey, d.Ingester))
 				r.Post("/accounts/{id}/offline",
-					apiv1.OfflineAccount(d.Accounts, d.Connector, d.Bundler, d.Audit))
+					apiv1.OfflineAccount(d.Accounts, d.Connector, d.Bundler, d.Audit, d.Ingester))
 				r.Get("/accounts/{id}/status",
 					apiv1.AccountStatus(d.Accounts, d.Connector))
 
 				// M3 debug surface — pre-M4 rooms subsystem.
 				r.Post("/debug/send", apiv1.DebugSend(d.Connector))
 				r.Get("/debug/events", apiv1.DebugEvents(d.Connector))
+
+				// M4: rooms (admin-only mutations except member self-PATCH).
+				r.Post("/rooms", apiv1.CreateRoom(d.Connector, d.Bundler, d.Audit))
+				r.Patch("/rooms/{id}", apiv1.UpdateRoom(d.Connector, d.Bundler, d.Audit))
+				r.Post("/rooms/{id}/archive", apiv1.ArchiveRoom(d.Bundler, d.Audit))
+				r.Delete("/rooms/{id}", apiv1.DeleteRoom(d.Connector, d.Bundler, d.Audit))
+				r.Post("/rooms/{id}/members", apiv1.InviteMember(d.Connector, d.Bundler, d.Audit))
+				r.Delete("/rooms/{id}/members/{account_id}", apiv1.KickMember(d.Connector, d.Bundler, d.Audit))
 			})
+
+			// Member-and-admin operations (auth required, no admin gate).
+			r.Get("/rooms", apiv1.ListRooms(d.Accounts, d.Bundler))
+			r.Get("/rooms/{id}", apiv1.GetRoom(d.Bundler))
+			r.Get("/rooms/{id}/members", apiv1.ListMembers(d.Bundler))
+			r.Patch("/memberships/{room_id}", apiv1.UpdateMembership(d.Bundler, d.Audit))
+
+			r.Post("/rooms/{id}/messages", apiv1.SendMessage(d.Connector, d.Bundler, d.Audit))
+			r.Get("/rooms/{id}/messages", apiv1.ListMessages(d.Bundler))
+			r.Post("/messages/{id}/read", apiv1.MarkRead(d.Bundler, d.Audit))
+			r.Post("/messages/{id}/reply-ack", apiv1.ReplyAck(d.Bundler, d.Audit))
 		})
 	})
 

@@ -364,3 +364,150 @@ func (c *Client) ListAudit(ctx context.Context, opts ListAuditOptions) ([]apiv1.
 	}
 	return out.Entries, nil
 }
+
+// M4 — rooms.
+
+func (c *Client) CreateRoom(ctx context.Context, name string) (*apiv1.RoomResponse, error) {
+	var out apiv1.RoomResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/rooms",
+		apiv1.CreateRoomRequest{Name: name}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ListRoomsOptions narrows ListRooms results.
+type ListRoomsOptions struct {
+	IncludeArchived bool
+}
+
+func (c *Client) ListRooms(ctx context.Context, opts ListRoomsOptions) ([]apiv1.RoomResponse, error) {
+	q := ""
+	if opts.IncludeArchived {
+		q = "?include_archived=true"
+	}
+	var out apiv1.RoomListResponse
+	if err := c.do(ctx, http.MethodGet, "/v1/rooms"+q, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Rooms, nil
+}
+
+func (c *Client) GetRoom(ctx context.Context, id string) (*apiv1.RoomResponse, error) {
+	var out apiv1.RoomResponse
+	if err := c.do(ctx, http.MethodGet, "/v1/rooms/"+id, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) RenameRoom(ctx context.Context, id, name string) (*apiv1.RoomResponse, error) {
+	var out apiv1.RoomResponse
+	if err := c.do(ctx, http.MethodPatch, "/v1/rooms/"+id,
+		apiv1.UpdateRoomRequest{Name: &name}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) ArchiveRoom(ctx context.Context, id string) (*apiv1.RoomResponse, error) {
+	var out apiv1.RoomResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/rooms/"+id+"/archive", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) DeleteRoom(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/rooms/"+id, nil, nil)
+}
+
+func (c *Client) InviteMember(ctx context.Context, roomID, accountID string, subscribed bool) (*apiv1.MembershipResponse, error) {
+	var out apiv1.MembershipResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/rooms/"+roomID+"/members",
+		apiv1.InviteRequest{AccountID: accountID, Subscribed: subscribed}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) KickMember(ctx context.Context, roomID, accountID string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/rooms/"+roomID+"/members/"+accountID, nil, nil)
+}
+
+func (c *Client) ListMembers(ctx context.Context, roomID string) ([]apiv1.MembershipResponse, error) {
+	var out apiv1.MembershipListResponse
+	if err := c.do(ctx, http.MethodGet, "/v1/rooms/"+roomID+"/members", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Members, nil
+}
+
+func (c *Client) SetSubscribed(ctx context.Context, roomID string, subscribed bool) (*apiv1.MembershipResponse, error) {
+	var out apiv1.MembershipResponse
+	if err := c.do(ctx, http.MethodPatch, "/v1/memberships/"+roomID,
+		apiv1.UpdateMembershipRequest{Subscribed: subscribed}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SendMessageOptions wraps the optional bits of SendMessage.
+type SendMessageOptions struct {
+	ReplyToID   string
+	RequiresAck bool
+	Priority    string
+}
+
+func (c *Client) SendMessage(ctx context.Context, roomID, content string, opts SendMessageOptions) (*apiv1.MessageResponse, error) {
+	var out apiv1.MessageResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/rooms/"+roomID+"/messages",
+		apiv1.SendMessageRequest{
+			Content:     content,
+			ReplyToID:   opts.ReplyToID,
+			RequiresAck: opts.RequiresAck,
+			Priority:    opts.Priority,
+		}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ListMessagesOptions narrows ListMessages results.
+type ListMessagesOptions struct {
+	Before string
+	Limit  int
+}
+
+func (c *Client) ListMessages(ctx context.Context, roomID string, opts ListMessagesOptions) ([]apiv1.MessageResponse, error) {
+	q := ""
+	sep := "?"
+	if opts.Before != "" {
+		q += sep + "before=" + opts.Before
+		sep = "&"
+	}
+	if opts.Limit > 0 {
+		q += sep + "limit=" + fmt.Sprint(opts.Limit)
+	}
+	var out apiv1.MessageListResponse
+	if err := c.do(ctx, http.MethodGet, "/v1/rooms/"+roomID+"/messages"+q, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Messages, nil
+}
+
+func (c *Client) MarkMessageRead(ctx context.Context, messageID string) (*apiv1.MessageStateResponse, error) {
+	var out apiv1.MessageStateResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/messages/"+messageID+"/read", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) ReplyAckMessage(ctx context.Context, messageID string) (*apiv1.MessageStateResponse, error) {
+	var out apiv1.MessageStateResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/messages/"+messageID+"/reply-ack", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

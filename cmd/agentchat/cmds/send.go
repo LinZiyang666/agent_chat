@@ -1,0 +1,79 @@
+package cmds
+
+import (
+	"fmt"
+	"io"
+	"os"
+
+	"github.com/spf13/cobra"
+
+	"github.com/LinZiyang666/agentchat/pkg/client"
+)
+
+var (
+	flagSendReplyTo     string
+	flagSendRequiresAck bool
+	flagSendPriority    string
+	flagSendFromFile    string
+)
+
+var sendCmd = &cobra.Command{
+	Use:   "send <room-id> [text]",
+	Short: "Send a message to a room.",
+	Long: `Send a message to a room (the caller's account must be a member and
+online). The text may be passed as the second positional argument, or
+read from stdin via "--file -".`,
+	Args: cobra.RangeArgs(1, 2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		roomID := args[0]
+		var content string
+		switch {
+		case len(args) == 2:
+			content = args[1]
+		case flagSendFromFile == "-":
+			b, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				return err
+			}
+			content = string(b)
+		case flagSendFromFile != "":
+			b, err := os.ReadFile(flagSendFromFile)
+			if err != nil {
+				return err
+			}
+			content = string(b)
+		default:
+			return fmt.Errorf("provide message text as the second argument or via --file")
+		}
+		if content == "" {
+			return fmt.Errorf("content is empty")
+		}
+
+		c := newClient()
+		m, err := c.SendMessage(cmd.Context(), roomID, content, client.SendMessageOptions{
+			ReplyToID:   flagSendReplyTo,
+			RequiresAck: flagSendRequiresAck,
+			Priority:    flagSendPriority,
+		})
+		if err != nil {
+			return err
+		}
+		if outputJSON() {
+			return writeJSON(m)
+		}
+		fmt.Fprintf(os.Stdout, "Sent message %s (discord=%s) at %s\n",
+			m.ID, m.DiscordMsgID, renderTime(m.CreatedAt))
+		return nil
+	},
+}
+
+func init() {
+	sendCmd.Flags().StringVar(&flagSendReplyTo, "reply", "", "message id this is a reply to")
+	sendCmd.Flags().BoolVar(&flagSendRequiresAck, "requires-ack", false,
+		"flag the message as requiring a reply-ack from recipients")
+	sendCmd.Flags().StringVar(&flagSendPriority, "priority", "",
+		"priority band: normal | urgent | system (default normal)")
+	sendCmd.Flags().StringVar(&flagSendFromFile, "file", "",
+		"read message content from this file; use '-' for stdin")
+	rootCmd.AddCommand(sendCmd)
+}

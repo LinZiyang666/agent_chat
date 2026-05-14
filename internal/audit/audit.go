@@ -29,6 +29,19 @@ const (
 	ActionAccountOffline    Action = "account.offline"
 	ActionTokenCreate       Action = "token.create"
 	ActionTokenRevoke       Action = "token.revoke"
+
+	// M4 actions: rooms, memberships, messages.
+	ActionRoomCreate            Action = "room.create"
+	ActionRoomRename            Action = "room.rename"
+	ActionRoomArchive           Action = "room.archive"
+	ActionRoomDelete            Action = "room.delete"
+	ActionRoomMemberAdd         Action = "room.member.add"
+	ActionRoomMemberRemove      Action = "room.member.remove"
+	ActionMembershipSubscribe   Action = "membership.subscribe"
+	ActionMembershipUnsubscribe Action = "membership.unsubscribe"
+	ActionMessageSend           Action = "message.send"
+	ActionMessageRead           Action = "message.read"
+	ActionMessageReplyAck       Action = "message.reply_ack"
 )
 
 // Deprecated aliases retained so older payloads (or external readers

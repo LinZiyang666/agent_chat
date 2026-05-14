@@ -118,6 +118,73 @@ func AuditToResponse(e *store.AuditEntry) AuditEntryResponse {
 	}
 }
 
+// RoomToResponse converts a store.Room into its public DTO.
+func RoomToResponse(r *store.Room) RoomResponse {
+	if r == nil {
+		return RoomResponse{}
+	}
+	return RoomResponse{
+		ID:               r.ID,
+		DiscordChannelID: r.DiscordChannelID,
+		Name:             r.Name,
+		Archived:         r.Archived,
+		CreatedAt:        r.CreatedAt,
+		UpdatedAt:        r.UpdatedAt,
+	}
+}
+
+// MembershipToResponse converts a store.Membership into its public DTO.
+func MembershipToResponse(m *store.Membership) MembershipResponse {
+	if m == nil {
+		return MembershipResponse{}
+	}
+	return MembershipResponse{
+		AccountID:  m.AccountID,
+		RoomID:     m.RoomID,
+		Subscribed: m.Subscribed,
+		JoinedAt:   m.JoinedAt,
+	}
+}
+
+// MessageToResponse converts a store.Message into its public DTO.
+func MessageToResponse(m *store.Message) MessageResponse {
+	if m == nil {
+		return MessageResponse{}
+	}
+	return MessageResponse{
+		ID:              m.ID,
+		RoomID:          m.RoomID,
+		AuthorAccountID: m.AuthorAccountID,
+		DiscordMsgID:    m.DiscordMsgID,
+		Content:         m.Content,
+		ReplyToMsgID:    m.ReplyToMsgID,
+		RequiresAck:     m.RequiresAck,
+		Priority:        string(m.Priority),
+		CreatedAt:       m.CreatedAt,
+		ContentHash:     m.ContentHash,
+	}
+}
+
+// MessageStateToResponse converts a store.MessageState into its public DTO.
+func MessageStateToResponse(s *store.MessageState) MessageStateResponse {
+	if s == nil {
+		return MessageStateResponse{}
+	}
+	out := MessageStateResponse{
+		MessageID: s.MessageID,
+		AccountID: s.AccountID,
+	}
+	if s.ReadAt != nil {
+		v := s.ReadAt.UTC()
+		out.ReadAt = &v
+	}
+	if s.RepliedAt != nil {
+		v := s.RepliedAt.UTC()
+		out.RepliedAt = &v
+	}
+	return out
+}
+
 // ParseSinceParam interprets the ?since= query parameter as an RFC3339
 // timestamp. Returns nil for missing/empty values.
 func ParseSinceParam(s string) (*time.Time, error) {
