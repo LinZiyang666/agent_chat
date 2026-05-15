@@ -30,6 +30,9 @@ type Aggregator struct {
 	priorityLimit int
 	newRoomsLimit int
 	recentLimit   int
+	// M6 caps on the announcement feeds.
+	announcementsLimit       int
+	systemAnnouncementsLimit int
 	// newRoomsWindow is the lookback for the NewRooms dimension —
 	// memberships joined within this duration count as "new".
 	newRoomsWindow time.Duration
@@ -43,15 +46,17 @@ func New(bundle store.Bundle, status ProviderStatusFn) *Aggregator {
 		status = func(string) bot.ConnStatus { return bot.StatusOffline }
 	}
 	return &Aggregator{
-		bundle:         bundle,
-		status:         status,
-		now:            func() time.Time { return time.Now().UTC() },
-		mentionsLimit:  50,
-		pendingLimit:   50,
-		priorityLimit:  50,
-		newRoomsLimit:  5,
-		recentLimit:    20,
-		newRoomsWindow: 24 * time.Hour,
+		bundle:                   bundle,
+		status:                   status,
+		now:                      func() time.Time { return time.Now().UTC() },
+		mentionsLimit:            50,
+		pendingLimit:             50,
+		priorityLimit:            50,
+		newRoomsLimit:            5,
+		recentLimit:              20,
+		announcementsLimit:       20,
+		systemAnnouncementsLimit: 20,
+		newRoomsWindow:           24 * time.Hour,
 	}
 }
 
@@ -154,6 +159,51 @@ func (a *Aggregator) Build(ctx context.Context, accountID string, version int64)
 	}
 	newRooms, recent := a.buildRoomFeeds(joined, latestPerRoom)
 
+	// M6 dimensions: unread room announcements + unread system
+	// announcements. Both surfaces are capped feeds backed by their
+	// own Count* totals — same split as messages (M5-P3-002).
+	annTotal, err := a.bundle.AnnouncementReads.CountUnreadForAccount(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	annList, err := a.bundle.AnnouncementReads.ListUnreadForAccount(ctx, accountID, a.announcementsLimit)
+	if err != nil {
+		return nil, err
+	}
+	announcements := make([]AnnouncementEntry, 0, len(annList))
+	for _, an := range annList {
+		entry := AnnouncementEntry{
+			AnnouncementID: an.ID,
+			RoomID:         an.RoomID,
+			Version:        an.Version,
+			Content:        an.Content,
+			CreatedBy:      an.CreatedBy,
+			CreatedAt:      an.CreatedAt,
+		}
+		if room := roomByID[an.RoomID]; room != nil {
+			entry.RoomName = room.Name
+		}
+		announcements = append(announcements, entry)
+	}
+
+	sysTotal, err := a.bundle.SystemAnnouncementReads.CountUnreadForAccount(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	sysList, err := a.bundle.SystemAnnouncementReads.ListUnreadForAccount(ctx, accountID, a.systemAnnouncementsLimit)
+	if err != nil {
+		return nil, err
+	}
+	sysAnnouncements := make([]SystemAnnouncementEntry, 0, len(sysList))
+	for _, sa := range sysList {
+		sysAnnouncements = append(sysAnnouncements, SystemAnnouncementEntry{
+			SysAnnID:  sa.ID,
+			Content:   sa.Content,
+			CreatedBy: sa.CreatedBy,
+			CreatedAt: sa.CreatedAt,
+		})
+	}
+
 	// Dimension 8: health bar.
 	health := Health{
 		TokenOK: true,
@@ -169,18 +219,22 @@ func (a *Aggregator) Build(ctx context.Context, accountID string, version int64)
 		AccountID: accountID,
 		EmittedAt: a.now(),
 		Totals: Totals{
-			Unread:      totalsUnread,
-			Mentions:    totalsMentions,
-			PendingAcks: totalsPendingAcks,
-			Priority:    totalsPriority,
+			Unread:              totalsUnread,
+			Mentions:            totalsMentions,
+			PendingAcks:         totalsPendingAcks,
+			Priority:            totalsPriority,
+			Announcements:       annTotal,
+			SystemAnnouncements: sysTotal,
 		},
-		Rooms:          rooms,
-		Mentions:       mentions,
-		PendingAcks:    pendingAcks,
-		Priority:       priority,
-		NewRooms:       newRooms,
-		RecentlyActive: recent,
-		Health:         health,
+		Rooms:               rooms,
+		Mentions:            mentions,
+		PendingAcks:         pendingAcks,
+		Priority:            priority,
+		NewRooms:            newRooms,
+		RecentlyActive:      recent,
+		Announcements:       announcements,
+		SystemAnnouncements: sysAnnouncements,
+		Health:              health,
 	}, nil
 }
 

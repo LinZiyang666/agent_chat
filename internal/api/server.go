@@ -106,6 +106,9 @@ func NewRouter(d Deps) http.Handler {
 				r.Delete("/rooms/{id}", apiv1.DeleteRoom(d.Connector, d.Bundler, d.Audit, d.StateBus))
 				r.Post("/rooms/{id}/members", apiv1.InviteMember(d.Connector, d.Bundler, d.Audit, d.StateBus))
 				r.Delete("/rooms/{id}/members/{account_id}", apiv1.KickMember(d.Connector, d.Bundler, d.Audit, d.StateBus))
+
+				// M6: system announcements (admin-only create).
+				r.Post("/system/announcements", apiv1.CreateSystemAnnouncement(d.Bundler, d.Audit, d.StateBus))
 			})
 
 			// Member-and-admin operations (auth required, no admin gate).
@@ -118,6 +121,19 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/rooms/{id}/messages", apiv1.ListMessages(d.Bundler))
 			r.Post("/messages/{id}/read", apiv1.MarkRead(d.Bundler, d.Audit, d.StateBus))
 			r.Post("/messages/{id}/reply-ack", apiv1.ReplyAck(d.Bundler, d.Audit, d.StateBus))
+
+			// M6: announcements (room-scoped + per-announcement ack).
+			// Any member of the room can post (admins bypass the member
+			// gate); the GET endpoint always returns the latest version
+			// with the caller's per-version read flag.
+			r.Post("/rooms/{id}/announcement", apiv1.CreateAnnouncement(d.Bundler, d.Audit, d.StateBus))
+			r.Get("/rooms/{id}/announcement", apiv1.GetAnnouncement(d.Bundler))
+			r.Post("/announcements/{id}/read", apiv1.MarkAnnouncementRead(d.Bundler, d.Audit, d.StateBus))
+
+			// M6: system announcements (admin-only create above; list +
+			// per-row ack open to any authenticated caller).
+			r.Get("/system/announcements", apiv1.ListSystemAnnouncements(d.Bundler))
+			r.Post("/system/announcements/{id}/read", apiv1.MarkSystemAnnouncementRead(d.Bundler, d.Audit, d.StateBus))
 
 			// M5: state view (one-shot + watch NDJSON).
 			r.Get("/state", apiv1.GetState(d.StateBus))

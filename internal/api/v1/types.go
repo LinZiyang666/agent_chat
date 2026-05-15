@@ -151,6 +151,10 @@ type SendMessageRequest struct {
 	ReplyToID   string `json:"reply_to_id,omitempty"`
 	RequiresAck bool   `json:"requires_ack,omitempty"`
 	Priority    string `json:"priority,omitempty"`
+	// MentionAll (M6) signals @all: every member of the room sees the
+	// message in their mentions feed, in addition to the literal
+	// "<@bot_user_id>" content match. Off by default.
+	MentionAll bool `json:"mention_all,omitempty"`
 }
 
 // MessageResponse is the public shape of a Message row.
@@ -165,6 +169,7 @@ type MessageResponse struct {
 	Priority        string    `json:"priority"`
 	CreatedAt       time.Time `json:"created_at"`
 	ContentHash     string    `json:"content_hash"`
+	MentionAll      bool      `json:"mention_all,omitempty"`
 }
 
 // MessageListResponse is the body of GET /v1/rooms/{id}/messages.
@@ -178,4 +183,64 @@ type MessageStateResponse struct {
 	AccountID string     `json:"account_id"`
 	ReadAt    *time.Time `json:"read_at,omitempty"`
 	RepliedAt *time.Time `json:"replied_at,omitempty"`
+}
+
+// --- M6: announcements ----------------------------------------------------
+
+// CreateAnnouncementRequest is the body of
+// POST /v1/rooms/{id}/announcement. Posting bumps the version and
+// resets unread for every current room member.
+type CreateAnnouncementRequest struct {
+	Content string `json:"content"`
+}
+
+// AnnouncementResponse is the public shape of an Announcement row.
+type AnnouncementResponse struct {
+	ID        string    `json:"id"`
+	RoomID    string    `json:"room_id"`
+	Content   string    `json:"content"`
+	Version   int       `json:"version"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+	// Read is only populated by ListUnreadAnnouncements callers (always
+	// false there) and by GetAnnouncement (true if the caller has ack'd).
+	Read bool `json:"read"`
+}
+
+// AnnouncementReadResponse is the public shape of an
+// AnnouncementRead row (M6).
+type AnnouncementReadResponse struct {
+	AnnouncementID string    `json:"announcement_id"`
+	AccountID      string    `json:"account_id"`
+	ReadAt         time.Time `json:"read_at"`
+}
+
+// CreateSystemAnnouncementRequest is the body of
+// POST /v1/system/announcements.
+type CreateSystemAnnouncementRequest struct {
+	Content string `json:"content"`
+}
+
+// SystemAnnouncementResponse is the public shape of a
+// SystemAnnouncement row.
+type SystemAnnouncementResponse struct {
+	ID        string    `json:"id"`
+	Content   string    `json:"content"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+	Read      bool      `json:"read"`
+}
+
+// SystemAnnouncementListResponse is the body of
+// GET /v1/system/announcements.
+type SystemAnnouncementListResponse struct {
+	Announcements []SystemAnnouncementResponse `json:"announcements"`
+}
+
+// SystemAnnouncementReadResponse is the public shape of a
+// SystemAnnouncementRead row.
+type SystemAnnouncementReadResponse struct {
+	SysAnnID  string    `json:"sys_ann_id"`
+	AccountID string    `json:"account_id"`
+	ReadAt    time.Time `json:"read_at"`
 }

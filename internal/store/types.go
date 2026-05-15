@@ -154,6 +154,10 @@ type Message struct {
 	Priority        MessagePriority
 	CreatedAt       time.Time
 	ContentHash     string
+	// MentionAll is the @all flag (M6). When true, every member of the
+	// message's room counts the message in their mentions feed, in
+	// addition to literal "<@bot_user_id>" matches.
+	MentionAll bool
 }
 
 // MessageState is one per-account read/reply state row. Both
@@ -181,4 +185,43 @@ type Reaction struct {
 	AccountID string
 	Emoji     string
 	CreatedAt time.Time
+}
+
+// Announcement is one room-scoped announcement row (M6). Each call to
+// "room announce" produces a fresh row with version = prior_version+1,
+// preserving history. The GET endpoint returns only the highest-version
+// row.
+type Announcement struct {
+	ID        string
+	RoomID    string
+	Content   string
+	Version   int
+	CreatedBy string // account id of the poster
+	CreatedAt time.Time
+}
+
+// AnnouncementRead is one per-account ack of a specific announcement
+// version. Absence = unread (mirrors message_states semantics).
+type AnnouncementRead struct {
+	AnnouncementID string
+	AccountID      string
+	ReadAt         time.Time
+}
+
+// SystemAnnouncement is one global, admin-issued announcement (M6).
+// Every account is implicitly unread until they ack via the
+// system_announcement_reads table.
+type SystemAnnouncement struct {
+	ID        string
+	Content   string
+	CreatedBy string // admin account id
+	CreatedAt time.Time
+}
+
+// SystemAnnouncementRead is one per-account ack of a system
+// announcement. Absence = unread.
+type SystemAnnouncementRead struct {
+	SysAnnID  string
+	AccountID string
+	ReadAt    time.Time
 }

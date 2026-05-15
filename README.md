@@ -11,12 +11,17 @@ TTY-friendly fallbacks for humans.
 
 ## Status
 
-Early development. M5 (state aggregation engine + `watch state`
-NDJSON stream + 8-dimension Snapshot per requirements §5.2, 200 ms
-debounce, idle streams byte-quiet) closed 2026-05-14. M4 (rooms +
-messages) closed 2026-05-14. M3 (Bot abstraction + Discord adapter +
-lifecycle) closed 2026-05-14. M6 (announcements) is next — see
-`docs/04-roadmap.md` §7.
+Early development. M6 (announcements: room announcements with
+versioning, `@all` mention flag on regular messages, admin-only
+system announcements; M5 Snapshot extended with two new dimensions +
+two Totals counters; `MessageEntry` JSON id key normalized) closed
+2026-05-14 after one Phase 3 round (`M6-P3-001` mention_all reach,
+`M6-P3-002` creator FK constraint). M5 (state aggregation engine +
+`watch state` NDJSON stream + 8-dimension Snapshot per requirements
+§5.2, 200 ms debounce, idle streams byte-quiet) closed 2026-05-14.
+M4 (rooms + messages) closed 2026-05-14. M3 (Bot abstraction +
+Discord adapter + lifecycle) closed 2026-05-14. M7 (attachments) is
+next — see `docs/04-roadmap.md` §8.
 
 ## Components
 
@@ -42,7 +47,7 @@ make build
 make test          # all packages
 make test-race     # with race detector
 make cover         # coverage summary (code-bearing packages only)
-make smoke         # end-to-end smoke tests (M1 + M2 + M3 + M4 + M5)
+make smoke         # end-to-end smoke tests (M1 + M2 + M3 + M4 + M5 + M6)
 ```
 
 ## Documentation

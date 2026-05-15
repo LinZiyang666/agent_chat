@@ -120,6 +120,7 @@ type SendMetadata struct {
 	RequiresAck     bool
 	Priority        MessagePriority
 	ContentHash     string
+	MentionAll      bool
 }
 
 // MessageStateRepo persists MessageState rows (per-account read/reply
@@ -173,17 +174,82 @@ type MessageStateRepo interface {
 	ListPriorityForSubscribed(ctx context.Context, accountID string, limit int) ([]*Message, error)
 }
 
+// AnnouncementRepo persists room-scoped announcements (M6). Versions
+// are monotonically increasing within a room: every Create assigns
+// prior_max_version+1. The GET endpoint exposes only the latest row.
+type AnnouncementRepo interface {
+	// Create inserts a new announcement with version =
+	// NextVersion(roomID). Returns the assigned row.
+	Create(ctx context.Context, a *Announcement) error
+	// Get returns the announcement by id.
+	Get(ctx context.Context, id string) (*Announcement, error)
+	// Latest returns the highest-version row in roomID, or
+	// errcode.NotFound if the room has none yet.
+	Latest(ctx context.Context, roomID string) (*Announcement, error)
+	// NextVersion returns 1 if the room has no announcements yet,
+	// else max(version)+1. Used inside Create's transaction.
+	NextVersion(ctx context.Context, roomID string) (int, error)
+}
+
+// AnnouncementReadRepo records per-account acks of room announcements
+// (M6). Absence of a row = unread.
+type AnnouncementReadRepo interface {
+	// Upsert marks (announcementID, accountID) as read at the given
+	// instant. Re-acks are idempotent (read_at is overwritten with
+	// the new time).
+	Upsert(ctx context.Context, r *AnnouncementRead) error
+	// IsRead reports whether the account has ack'd this announcement
+	// id at any point.
+	IsRead(ctx context.Context, announcementID, accountID string) (bool, error)
+	// CountUnreadForAccount returns how many announcements exist in
+	// rooms the account is a *member* of (subscribed or not, archived
+	// or not — announcements are mandatory-read across the membership)
+	// where no ack row exists. Used by the M5 aggregator extension.
+	CountUnreadForAccount(ctx context.Context, accountID string) (int, error)
+	// ListUnreadForAccount returns up to limit unread announcements
+	// for the account, newest-first, joined with the announcement row.
+	// Each Announcement also carries its room id so the aggregator can
+	// surface the room name.
+	ListUnreadForAccount(ctx context.Context, accountID string, limit int) ([]*Announcement, error)
+}
+
+// SystemAnnouncementRepo persists global admin announcements (M6).
+type SystemAnnouncementRepo interface {
+	Create(ctx context.Context, a *SystemAnnouncement) error
+	Get(ctx context.Context, id string) (*SystemAnnouncement, error)
+	// List returns all system announcements, newest-first, capped at
+	// limit (0 = repo default).
+	List(ctx context.Context, limit int) ([]*SystemAnnouncement, error)
+}
+
+// SystemAnnouncementReadRepo records per-account acks of system
+// announcements (M6). Same absence-=-unread semantics.
+type SystemAnnouncementReadRepo interface {
+	Upsert(ctx context.Context, r *SystemAnnouncementRead) error
+	IsRead(ctx context.Context, sysAnnID, accountID string) (bool, error)
+	// CountUnreadForAccount returns how many system announcements
+	// exist that the account has not ack'd.
+	CountUnreadForAccount(ctx context.Context, accountID string) (int, error)
+	// ListUnreadForAccount returns up to limit unread system
+	// announcements, newest-first.
+	ListUnreadForAccount(ctx context.Context, accountID string, limit int) ([]*SystemAnnouncement, error)
+}
+
 // Bundle aggregates the repositories the daemon uses. Backends
 // (e.g. internal/store/sqlite) construct a Bundle so callers receive a
 // single value.
 type Bundle struct {
-	Accounts      AccountRepo
-	Tokens        TokenRepo
-	Audit         AuditRepo
-	Rooms         RoomRepo
-	Memberships   MembershipRepo
-	Messages      MessageRepo
-	MessageStates MessageStateRepo
+	Accounts                AccountRepo
+	Tokens                  TokenRepo
+	Audit                   AuditRepo
+	Rooms                   RoomRepo
+	Memberships             MembershipRepo
+	Messages                MessageRepo
+	MessageStates           MessageStateRepo
+	Announcements           AnnouncementRepo
+	AnnouncementReads       AnnouncementReadRepo
+	SystemAnnouncements     SystemAnnouncementRepo
+	SystemAnnouncementReads SystemAnnouncementReadRepo
 }
 
 // Bundler runs a closure inside a single backend-level transaction.

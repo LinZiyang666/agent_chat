@@ -54,6 +54,20 @@ type Snapshot struct {
 
 	// 8. Health bar — token / Discord API / network / recent errors.
 	Health Health `json:"health"`
+
+	// M6 additions — unread announcements (room-scoped) and unread
+	// system announcements. Each is a separate dimension because the
+	// state UI surfaces them differently from regular messages
+	// (mandatory-read semantics). The visible feed is capped; counts
+	// in Totals reflect the full unbounded set.
+
+	// Announcements is the list of unread room announcements that
+	// concern the agent (= latest version in every room they are a
+	// member of, with no ack row yet).
+	Announcements []AnnouncementEntry `json:"announcements"`
+
+	// SystemAnnouncements is the list of unread system announcements.
+	SystemAnnouncements []SystemAnnouncementEntry `json:"system_announcements"`
 }
 
 // Totals is the aggregate counter block (dimension 1).
@@ -62,6 +76,12 @@ type Totals struct {
 	Mentions    int `json:"mentions"`
 	PendingAcks int `json:"pending_acks"`
 	Priority    int `json:"priority"`
+	// M6: unread announcement counts. Announcements is the count of
+	// rooms the agent is a member of whose latest announcement hasn't
+	// been ack'd yet. SystemAnnouncements is the count of system
+	// announcements without a per-account ack row.
+	Announcements       int `json:"announcements"`
+	SystemAnnouncements int `json:"system_announcements"`
 }
 
 // RoomUnread is one row of the per-room unread breakdown
@@ -89,8 +109,12 @@ type RoomEntry struct {
 // pending-ack / priority sections. The state UI keeps these short;
 // callers can re-fetch via /v1/rooms/{id}/messages when they want
 // the full body.
+//
+// The JSON key for the row identifier is `id` (M6-P3 normalization)
+// to match the messages API's `MessageResponse.ID`. M5 originally
+// emitted `message_id`; consumers updated during the M6 audit pass.
 type MessageEntry struct {
-	MessageID       string    `json:"message_id"`
+	MessageID       string    `json:"id"`
 	RoomID          string    `json:"room_id"`
 	RoomName        string    `json:"room_name"`
 	AuthorAccountID string    `json:"author_account_id,omitempty"`
@@ -98,6 +122,27 @@ type MessageEntry struct {
 	RequiresAck     bool      `json:"requires_ack"`
 	Content         string    `json:"content"`
 	CreatedAt       time.Time `json:"created_at"`
+}
+
+// AnnouncementEntry is the slim view of a room announcement used by
+// the M6 announcements dimension. Like MessageEntry, callers can
+// re-fetch via GET /v1/rooms/{id}/announcement for the full row.
+type AnnouncementEntry struct {
+	AnnouncementID string    `json:"announcement_id"`
+	RoomID         string    `json:"room_id"`
+	RoomName       string    `json:"room_name"`
+	Version        int       `json:"version"`
+	Content        string    `json:"content"`
+	CreatedBy      string    `json:"created_by"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+// SystemAnnouncementEntry is the slim view of a system announcement.
+type SystemAnnouncementEntry struct {
+	SysAnnID  string    `json:"sys_ann_id"`
+	Content   string    `json:"content"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Health is the system-health bar (dimension 8). M5 wires the

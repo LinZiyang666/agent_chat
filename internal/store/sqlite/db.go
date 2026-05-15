@@ -64,13 +64,17 @@ func (s *Store) DB() *sql.DB { return s.db }
 // Bundle returns the repositories wired to this Store.
 func (s *Store) Bundle() store.Bundle {
 	return store.Bundle{
-		Accounts:      &accountRepo{db: s.db},
-		Tokens:        &tokenRepo{db: s.db},
-		Audit:         &auditRepo{db: s.db},
-		Rooms:         &roomRepo{db: s.db},
-		Memberships:   &membershipRepo{db: s.db},
-		Messages:      &messageRepo{db: s.db},
-		MessageStates: &messageStateRepo{db: s.db},
+		Accounts:                &accountRepo{db: s.db},
+		Tokens:                  &tokenRepo{db: s.db},
+		Audit:                   &auditRepo{db: s.db},
+		Rooms:                   &roomRepo{db: s.db},
+		Memberships:             &membershipRepo{db: s.db},
+		Messages:                &messageRepo{db: s.db},
+		MessageStates:           &messageStateRepo{db: s.db},
+		Announcements:           &announcementRepo{db: s.db},
+		AnnouncementReads:       &announcementReadRepo{db: s.db},
+		SystemAnnouncements:     &systemAnnouncementRepo{db: s.db},
+		SystemAnnouncementReads: &systemAnnouncementReadRepo{db: s.db},
 	}
 }
 
@@ -102,13 +106,17 @@ func (s *Store) WithTx(ctx context.Context, fn func(b store.Bundle) error) error
 	defer func() { _ = tx.Rollback() }()
 
 	txBundle := store.Bundle{
-		Accounts:      &accountRepo{db: tx},
-		Tokens:        &tokenRepo{db: tx},
-		Audit:         &auditRepo{db: tx},
-		Rooms:         &roomRepo{db: tx},
-		Memberships:   &membershipRepo{db: tx},
-		Messages:      &messageRepo{db: tx},
-		MessageStates: &messageStateRepo{db: tx},
+		Accounts:                &accountRepo{db: tx},
+		Tokens:                  &tokenRepo{db: tx},
+		Audit:                   &auditRepo{db: tx},
+		Rooms:                   &roomRepo{db: tx},
+		Memberships:             &membershipRepo{db: tx},
+		Messages:                &messageRepo{db: tx},
+		MessageStates:           &messageStateRepo{db: tx},
+		Announcements:           &announcementRepo{db: tx},
+		AnnouncementReads:       &announcementReadRepo{db: tx},
+		SystemAnnouncements:     &systemAnnouncementRepo{db: tx},
+		SystemAnnouncementReads: &systemAnnouncementReadRepo{db: tx},
 	}
 	if err := fn(txBundle); err != nil {
 		return err

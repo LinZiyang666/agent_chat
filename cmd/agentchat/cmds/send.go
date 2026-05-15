@@ -15,6 +15,7 @@ var (
 	flagSendRequiresAck bool
 	flagSendPriority    string
 	flagSendFromFile    string
+	flagSendMentionAll  bool
 )
 
 var sendCmd = &cobra.Command{
@@ -54,6 +55,7 @@ read from stdin via "--file -".`,
 			ReplyToID:   flagSendReplyTo,
 			RequiresAck: flagSendRequiresAck,
 			Priority:    flagSendPriority,
+			MentionAll:  flagSendMentionAll,
 		})
 		if err != nil {
 			return err
@@ -75,5 +77,7 @@ func init() {
 		"priority band: normal | urgent | system (default normal)")
 	sendCmd.Flags().StringVar(&flagSendFromFile, "file", "",
 		"read message content from this file; use '-' for stdin")
+	sendCmd.Flags().BoolVar(&flagSendMentionAll, "all", false,
+		"M6 @all: every member of the room sees this in their mentions feed")
 	rootCmd.AddCommand(sendCmd)
 }

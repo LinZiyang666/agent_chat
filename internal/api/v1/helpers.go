@@ -162,6 +162,37 @@ func MessageToResponse(m *store.Message) MessageResponse {
 		Priority:        string(m.Priority),
 		CreatedAt:       m.CreatedAt,
 		ContentHash:     m.ContentHash,
+		MentionAll:      m.MentionAll,
+	}
+}
+
+// AnnouncementToResponse converts a store.Announcement into its public DTO.
+// Read is left at the zero value; callers set it after consulting the
+// read repo.
+func AnnouncementToResponse(a *store.Announcement) AnnouncementResponse {
+	if a == nil {
+		return AnnouncementResponse{}
+	}
+	return AnnouncementResponse{
+		ID:        a.ID,
+		RoomID:    a.RoomID,
+		Content:   a.Content,
+		Version:   a.Version,
+		CreatedBy: a.CreatedBy,
+		CreatedAt: a.CreatedAt,
+	}
+}
+
+// SystemAnnouncementToResponse converts a store.SystemAnnouncement to its DTO.
+func SystemAnnouncementToResponse(a *store.SystemAnnouncement) SystemAnnouncementResponse {
+	if a == nil {
+		return SystemAnnouncementResponse{}
+	}
+	return SystemAnnouncementResponse{
+		ID:        a.ID,
+		Content:   a.Content,
+		CreatedBy: a.CreatedBy,
+		CreatedAt: a.CreatedAt,
 	}
 }
 

@@ -15,7 +15,7 @@ type messageRepo struct {
 }
 
 const messageSelectCols = `id, room_id, author_account_id, discord_msg_id, content,
-       reply_to_msg_id, requires_ack, priority, created_at, content_hash`
+       reply_to_msg_id, requires_ack, priority, created_at, content_hash, mention_all`
 
 func (r *messageRepo) Create(ctx context.Context, m *store.Message) error {
 	if m == nil {
@@ -26,11 +26,12 @@ func (r *messageRepo) Create(ctx context.Context, m *store.Message) error {
 	}
 	_, err := r.db.ExecContext(ctx, `
 INSERT INTO messages(id, room_id, author_account_id, discord_msg_id, content,
-                     reply_to_msg_id, requires_ack, priority, created_at, content_hash)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                     reply_to_msg_id, requires_ack, priority, created_at, content_hash,
+                     mention_all)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ID, m.RoomID, nullableString(m.AuthorAccountID), m.DiscordMsgID, m.Content,
 		nullableString(m.ReplyToMsgID), boolToInt(m.RequiresAck), string(m.Priority),
-		m.CreatedAt.Unix(), m.ContentHash,
+		m.CreatedAt.Unix(), m.ContentHash, boolToInt(m.MentionAll),
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -51,12 +52,13 @@ func (r *messageRepo) CreateIgnoreConflict(ctx context.Context, m *store.Message
 	}
 	res, err := r.db.ExecContext(ctx, `
 INSERT INTO messages(id, room_id, author_account_id, discord_msg_id, content,
-                     reply_to_msg_id, requires_ack, priority, created_at, content_hash)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     reply_to_msg_id, requires_ack, priority, created_at, content_hash,
+                     mention_all)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(discord_msg_id) DO NOTHING`,
 		m.ID, m.RoomID, nullableString(m.AuthorAccountID), m.DiscordMsgID, m.Content,
 		nullableString(m.ReplyToMsgID), boolToInt(m.RequiresAck), string(m.Priority),
-		m.CreatedAt.Unix(), m.ContentHash,
+		m.CreatedAt.Unix(), m.ContentHash, boolToInt(m.MentionAll),
 	)
 	if err != nil {
 		return "", false, errcode.Wrap(err, errcode.Internal, "insert-or-ignore message")
@@ -166,6 +168,7 @@ func (r *messageRepo) LatestPerRoomForMember(ctx context.Context, accountID stri
 WITH ranked AS (
   SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
          m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash,
+         m.mention_all,
          ROW_NUMBER() OVER (PARTITION BY m.room_id ORDER BY m.created_at DESC, m.id DESC) AS rn
     FROM messages m
     JOIN memberships mb ON mb.room_id = m.room_id
@@ -174,7 +177,7 @@ WITH ranked AS (
      AND rm.archived = 0
 )
 SELECT id, room_id, author_account_id, discord_msg_id, content,
-       reply_to_msg_id, requires_ack, priority, created_at, content_hash
+       reply_to_msg_id, requires_ack, priority, created_at, content_hash, mention_all
   FROM ranked
  WHERE rn = 1`, accountID)
 	if err != nil {
@@ -207,13 +210,15 @@ UPDATE messages
        reply_to_msg_id   = ?,
        requires_ack      = ?,
        priority          = ?,
-       content_hash      = ?
+       content_hash      = ?,
+       mention_all       = ?
  WHERE id = ?`,
 		nullableString(m.AuthorAccountID),
 		nullableString(m.ReplyToMsgID),
 		boolToInt(m.RequiresAck),
 		string(m.Priority),
 		m.ContentHash,
+		boolToInt(m.MentionAll),
 		id,
 	)
 	if err != nil {
@@ -241,9 +246,10 @@ func scanMessageRow(row rowScanner) (*store.Message, error) {
 		requiresAck int
 		priority    string
 		createdAt   int64
+		mentionAll  int
 	)
 	err := row.Scan(&m.ID, &m.RoomID, &authorID, &m.DiscordMsgID, &m.Content,
-		&replyToID, &requiresAck, &priority, &createdAt, &m.ContentHash)
+		&replyToID, &requiresAck, &priority, &createdAt, &m.ContentHash, &mentionAll)
 	if err != nil {
 		return nil, err
 	}
@@ -252,5 +258,6 @@ func scanMessageRow(row rowScanner) (*store.Message, error) {
 	m.RequiresAck = requiresAck != 0
 	m.Priority = store.MessagePriority(priority)
 	m.CreatedAt = time.Unix(createdAt, 0).UTC()
+	m.MentionAll = mentionAll != 0
 	return &m, nil
 }

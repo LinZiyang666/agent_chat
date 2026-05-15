@@ -156,6 +156,7 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 			RequiresAck:     req.RequiresAck,
 			CreatedAt:       sent.CreatedAt.UTC(),
 			ContentHash:     hex.EncodeToString(hash[:]),
+			MentionAll:      req.MentionAll,
 		}
 		if replyParent != nil {
 			msg.ReplyToMsgID = replyParent.ID
@@ -193,6 +194,7 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 					RequiresAck:     msg.RequiresAck,
 					Priority:        msg.Priority,
 					ContentHash:     msg.ContentHash,
+					MentionAll:      msg.MentionAll,
 				}); err != nil {
 					return err
 				}
@@ -236,6 +238,7 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 					"discord_msg_id":   sent.ID,
 					"requires_ack":     req.RequiresAck,
 					"priority":         string(priority),
+					"mention_all":      req.MentionAll,
 					"race_with_ingest": !inserted,
 				})
 		}); err != nil {

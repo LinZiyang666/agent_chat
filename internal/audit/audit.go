@@ -42,6 +42,14 @@ const (
 	ActionMessageSend           Action = "message.send"
 	ActionMessageRead           Action = "message.read"
 	ActionMessageReplyAck       Action = "message.reply_ack"
+
+	// M6 actions: announcements (room-scoped + system) and the @all
+	// flag on messages (recorded inside the existing message.send
+	// payload via the mention_all field).
+	ActionAnnouncementCreate Action = "announcement.create"
+	ActionAnnouncementRead   Action = "announcement.read"
+	ActionSystemAnnCreate    Action = "system_announcement.create"
+	ActionSystemAnnRead      Action = "system_announcement.read"
 )
 
 // Deprecated aliases retained so older payloads (or external readers

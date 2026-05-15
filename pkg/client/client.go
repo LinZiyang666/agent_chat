@@ -457,6 +457,7 @@ type SendMessageOptions struct {
 	ReplyToID   string
 	RequiresAck bool
 	Priority    string
+	MentionAll  bool
 }
 
 func (c *Client) SendMessage(ctx context.Context, roomID, content string, opts SendMessageOptions) (*apiv1.MessageResponse, error) {
@@ -467,7 +468,70 @@ func (c *Client) SendMessage(ctx context.Context, roomID, content string, opts S
 			ReplyToID:   opts.ReplyToID,
 			RequiresAck: opts.RequiresAck,
 			Priority:    opts.Priority,
+			MentionAll:  opts.MentionAll,
 		}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// M6 — announcements.
+
+// CreateAnnouncement posts a new room announcement (bumps version,
+// resets unread for every member of the room).
+func (c *Client) CreateAnnouncement(ctx context.Context, roomID, content string) (*apiv1.AnnouncementResponse, error) {
+	var out apiv1.AnnouncementResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/rooms/"+roomID+"/announcement",
+		apiv1.CreateAnnouncementRequest{Content: content}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetAnnouncement returns the latest announcement for the room with the
+// caller's per-version read flag.
+func (c *Client) GetAnnouncement(ctx context.Context, roomID string) (*apiv1.AnnouncementResponse, error) {
+	var out apiv1.AnnouncementResponse
+	if err := c.do(ctx, http.MethodGet, "/v1/rooms/"+roomID+"/announcement", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// AckAnnouncement acknowledges an announcement on behalf of the caller.
+func (c *Client) AckAnnouncement(ctx context.Context, announcementID string) (*apiv1.AnnouncementReadResponse, error) {
+	var out apiv1.AnnouncementReadResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/announcements/"+announcementID+"/read", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// CreateSystemAnnouncement posts a global system announcement
+// (admin-only).
+func (c *Client) CreateSystemAnnouncement(ctx context.Context, content string) (*apiv1.SystemAnnouncementResponse, error) {
+	var out apiv1.SystemAnnouncementResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/system/announcements",
+		apiv1.CreateSystemAnnouncementRequest{Content: content}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ListSystemAnnouncements returns every system announcement with the
+// caller's per-row Read flag.
+func (c *Client) ListSystemAnnouncements(ctx context.Context) ([]apiv1.SystemAnnouncementResponse, error) {
+	var out apiv1.SystemAnnouncementListResponse
+	if err := c.do(ctx, http.MethodGet, "/v1/system/announcements", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Announcements, nil
+}
+
+// AckSystemAnnouncement acknowledges a system announcement.
+func (c *Client) AckSystemAnnouncement(ctx context.Context, sysAnnID string) (*apiv1.SystemAnnouncementReadResponse, error) {
+	var out apiv1.SystemAnnouncementReadResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/system/announcements/"+sysAnnID+"/read", nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

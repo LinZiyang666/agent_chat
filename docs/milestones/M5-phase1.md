@@ -154,7 +154,7 @@ export AGENTCHAT_TOKEN=<admin-token>
 #   totals.pending_acks = 1
 #   totals.priority = 1
 #   rooms[…].unread = 1
-#   pending_acks[…].message_id = <new message id>
+#   pending_acks[…].id = <new message id>   (M5 originally emitted `message_id`; renamed in M6-P3-normalize)
 #   priority[…] same
 
 # Terminal A (still as user):

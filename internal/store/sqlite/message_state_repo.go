@@ -74,9 +74,18 @@ SELECT COUNT(*)
 }
 
 func (r *messageStateRepo) CountMentionsForSubscribed(ctx context.Context, accountID, botUserID string) (int, error) {
-	if botUserID == "" {
-		return 0, nil
-	}
+	// M6 (M6-P3-001 fix): the `mention_all` flag intentionally crosses
+	// the M5 subscribed-only filter — per requirements §3.5
+	// "群内当前所有成员" and roadmap §7 demo "所有成员的维度 3", a
+	// `@all` message reaches every current member of the room
+	// regardless of their subscription state. The literal `<@bot>`
+	// match keeps the M5 subscribed-only semantics (a content-targeted
+	// mention is only notification for subscribed members).
+	//
+	// Future members (memberships inserted after the message) are
+	// naturally excluded: the SendMessage fan-out only creates a
+	// message_states row for members existing at send time, so the
+	// JOIN to message_states already gates that.
 	needle := "%<@" + botUserID + ">%"
 	var n int
 	err := r.db.QueryRowContext(ctx, `
@@ -87,9 +96,12 @@ SELECT COUNT(*)
   JOIN rooms          rm ON rm.id = m.room_id
  WHERE ms.account_id = ?
    AND ms.read_at IS NULL
-   AND mb.subscribed = 1
    AND rm.archived = 0
-   AND m.content LIKE ?`, accountID, needle).Scan(&n)
+   AND (
+       m.mention_all = 1
+       OR (mb.subscribed = 1 AND ? <> '' AND m.content LIKE ?)
+   )`,
+		accountID, botUserID, needle).Scan(&n)
 	if err != nil {
 		return 0, errcode.Wrap(err, errcode.Internal, "count mentions for subscribed")
 	}
@@ -169,25 +181,27 @@ func (r *messageStateRepo) ListMentionsForSubscribed(ctx context.Context, accoun
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	if botUserID == "" {
-		// No mention token to look for → no mentions.
-		return nil, nil
-	}
+	// M6 (M6-P3-001 fix): mirror the predicate in
+	// CountMentionsForSubscribed — `mention_all = 1` crosses the
+	// subscribed filter; content `<@bot>` matches stay subscribed-only.
 	needle := "%<@" + botUserID + ">%"
 	rows, err := r.db.QueryContext(ctx, `
 SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
-       m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash
+       m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash,
+       m.mention_all
   FROM messages       m
   JOIN message_states ms ON ms.message_id = m.id
   JOIN memberships    mb ON mb.account_id = ms.account_id AND mb.room_id = m.room_id
   JOIN rooms          rm ON rm.id = m.room_id
  WHERE ms.account_id = ?
    AND ms.read_at IS NULL
-   AND mb.subscribed = 1
    AND rm.archived = 0
-   AND m.content LIKE ?
+   AND (
+       m.mention_all = 1
+       OR (mb.subscribed = 1 AND ? <> '' AND m.content LIKE ?)
+   )
  ORDER BY m.created_at DESC, m.id DESC
- LIMIT ?`, accountID, needle, limit)
+ LIMIT ?`, accountID, botUserID, needle, limit)
 	if err != nil {
 		return nil, errcode.Wrap(err, errcode.Internal, "list mentions for subscribed")
 	}
@@ -201,7 +215,8 @@ func (r *messageStateRepo) ListPendingAcksForSubscribed(ctx context.Context, acc
 	}
 	rows, err := r.db.QueryContext(ctx, `
 SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
-       m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash
+       m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash,
+       m.mention_all
   FROM messages       m
   JOIN message_states ms ON ms.message_id = m.id
   JOIN memberships    mb ON mb.account_id = ms.account_id AND mb.room_id = m.room_id
@@ -226,7 +241,8 @@ func (r *messageStateRepo) ListPriorityForSubscribed(ctx context.Context, accoun
 	}
 	rows, err := r.db.QueryContext(ctx, `
 SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
-       m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash
+       m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash,
+       m.mention_all
   FROM messages       m
   JOIN message_states ms ON ms.message_id = m.id
   JOIN memberships    mb ON mb.account_id = ms.account_id AND mb.room_id = m.room_id
