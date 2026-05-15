@@ -1,6 +1,9 @@
 package v1
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -9,6 +12,8 @@ import (
 
 	"github.com/LinZiyang666/agentchat/internal/audit"
 	"github.com/LinZiyang666/agentchat/internal/auth"
+	"github.com/LinZiyang666/agentchat/internal/bot"
+	"github.com/LinZiyang666/agentchat/internal/connector"
 	"github.com/LinZiyang666/agentchat/internal/errcode"
 	"github.com/LinZiyang666/agentchat/internal/state"
 	"github.com/LinZiyang666/agentchat/internal/store"
@@ -16,19 +21,29 @@ import (
 
 // CreateAnnouncement handles POST /v1/rooms/{id}/announcement.
 //
-// Sequence (all inside one WithTx):
-//  1. Resolve room (must not be archived).
-//  2. Check that the actor is a member of the room — any member can
-//     post an announcement per requirements §6.1. Admins bypass.
-//  3. Allocate version = NextVersion(roomID).
-//  4. Insert the announcement row.
-//  5. Audit announcement.create with the room + version in the payload.
+// Sequence:
+//  1. WithTx: resolve room (not archived), check membership (any
+//     member or admin), allocate version, insert announcement row,
+//     audit.
+//  2. After commit: post a *mirror message* to the same Discord
+//     channel via the actor's Provider so that humans reading
+//     Discord directly (who never look at agentchat state) still see
+//     the announcement content. The mirror is **best-effort** — a
+//     Provider failure here is logged but does NOT roll the
+//     announcement back. Rationale: the agentchat-side announcement
+//     row is the source of truth for the mandatory-read semantics
+//     (counted in `Totals.Announcements`); the Discord mirror is a
+//     courtesy to non-agentchat-aware viewers. If the mirror failed,
+//     the announcer (or any admin) can re-mirror by running
+//     `agentchat send <room> "[announcement v<N>] <content>"`
+//     themselves.
+//  3. publishRoomMembers so every member's state recomputes.
 //
-// After commit, every member of the room has their state recomputed
-// (the unread-announcement count is a state dimension; see the M5
-// aggregator extension). Errors after the tx commits do NOT roll the
-// announcement back — the bus publish is best-effort.
-func CreateAnnouncement(bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus) http.HandlerFunc {
+// The actor must be online (Provider acquired) for the mirror step;
+// the membership check already ran in step 1. We deliberately keep
+// the M5 publish on the success path even when the mirror fails so
+// state observers still get the new-announcement frame.
+func CreateAnnouncement(conn *connector.Connector, bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		roomID := chi.URLParam(r, "id")
 		var req CreateAnnouncementRequest
@@ -50,7 +65,10 @@ func CreateAnnouncement(bundler store.Bundler, recorder *audit.Recorder, bus *st
 			WriteError(w, errcode.Wrap(err, errcode.Internal, "uuidv7"))
 			return
 		}
-		var persisted *store.Announcement
+		var (
+			persisted  *store.Announcement
+			channelID  string
+		)
 		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {
 			room, err := b.Rooms.Get(r.Context(), roomID)
 			if err != nil {
@@ -88,6 +106,7 @@ func CreateAnnouncement(bundler store.Bundler, recorder *audit.Recorder, bus *st
 				return err
 			}
 			persisted = ann
+			channelID = room.DiscordChannelID
 			return recorder.RecordVia(r.Context(), b.Audit, actor.ID,
 				audit.ActionAnnouncementCreate, ann.ID, map[string]any{
 					"room_id": roomID,
@@ -97,9 +116,48 @@ func CreateAnnouncement(bundler store.Bundler, recorder *audit.Recorder, bus *st
 			WriteError(w, err)
 			return
 		}
+		// Best-effort mirror to the Discord channel. Failures do NOT
+		// fail the request — the agentchat announcement row is the
+		// source of truth; Discord echo is UX-only.
+		if conn != nil && channelID != "" {
+			mirrorAnnouncementBestEffort(r.Context(), conn, actor.ID, channelID, persisted, log)
+		}
 		// New announcement → every member's unread count just changed.
 		go publishRoomMembers(bus, bundler, roomID)
 		WriteJSON(w, http.StatusCreated, AnnouncementToResponse(persisted))
+	}
+}
+
+// mirrorAnnouncementBestEffort sends the announcement content as a
+// regular message to the Discord channel. It is intentionally fire-
+// and-forget at the agentchat layer: if the Provider call fails (bot
+// offline, permission revoked, Discord 5xx), the announcement row
+// stays in the DB and surfaces normally in agentchat state. Failures
+// are logged at WARN so an operator can re-mirror by hand.
+//
+// The mirror content carries the version explicitly so a reader
+// scrolling through #channel can tell which iteration they're seeing,
+// matching the agentchat-side semantics where the latest version
+// supersedes prior ones.
+func mirrorAnnouncementBestEffort(ctx context.Context, conn *connector.Connector, actorID, channelID string, ann *store.Announcement, log *slog.Logger) {
+	if conn == nil {
+		return
+	}
+	p, err := providerForActor(conn, actorID)
+	if err != nil {
+		if log != nil {
+			log.Warn("announcement mirror skipped — provider not available",
+				"announcement_id", ann.ID, "actor_id", actorID, "err", err.Error())
+		}
+		return
+	}
+	body := fmt.Sprintf("📢 **公告 v%d**\n%s", ann.Version, ann.Content)
+	if _, err := p.SendMessage(ctx, channelID, body, bot.SendOptions{}); err != nil {
+		if log != nil {
+			log.Warn("announcement mirror to Discord failed; announcement row still committed",
+				"announcement_id", ann.ID, "channel_id", channelID, "err", err.Error())
+		}
+		return
 	}
 }
 

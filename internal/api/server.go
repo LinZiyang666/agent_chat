@@ -126,7 +126,11 @@ func NewRouter(d Deps) http.Handler {
 			// Any member of the room can post (admins bypass the member
 			// gate); the GET endpoint always returns the latest version
 			// with the caller's per-version read flag.
-			r.Post("/rooms/{id}/announcement", apiv1.CreateAnnouncement(d.Bundler, d.Audit, d.StateBus))
+			//
+			// CreateAnnouncement also best-effort-mirrors the content
+			// to the Discord channel via the actor's Provider so
+			// non-agentchat-aware humans in #channel see the post.
+			r.Post("/rooms/{id}/announcement", apiv1.CreateAnnouncement(d.Connector, d.Bundler, d.Audit, d.StateBus, d.Log))
 			r.Get("/rooms/{id}/announcement", apiv1.GetAnnouncement(d.Bundler))
 			r.Post("/announcements/{id}/read", apiv1.MarkAnnouncementRead(d.Bundler, d.Audit, d.StateBus))
 
