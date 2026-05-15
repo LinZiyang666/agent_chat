@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -20,16 +22,22 @@ import (
 	"github.com/LinZiyang666/agentchat/internal/store"
 )
 
+// DiscordAttachmentLimit is the per-file Discord upload cap. M7
+// enforces this server-side: any attachment larger than this returns
+// ATTACHMENT_TOO_LARGE.
+const DiscordAttachmentLimit = 25 * 1024 * 1024
+
 // SendMessage handles POST /v1/rooms/{id}/messages.
 //
 // Sequence:
-//  1. Validate input (priority known; content non-empty).
-//  2. Acquire actor's Provider (must be online).
-//  3. Read tx: resolve room (must not be archived); read actor's role;
+//  1. Validate request shape (priority known; content or attachment).
+//  2. Read tx: resolve room (must not be archived); read actor's role;
 //     RoleUser must be a member of the room (PERM_DENIED otherwise),
 //     RoleAdmin bypasses the membership gate per requirements §5.1
 //     "发：admin 不受限" (M4-P3-004). Resolve reply parent if any.
-//  4. Call Provider.SendMessage (slow, outside tx).
+//  3. Validate attachment paths and per-file sizes (after authz).
+//  4. Acquire actor's Provider and call Provider.SendMessage (slow,
+//     outside tx).
 //  5. Write tx:
 //     - INSERT-or-IGNORE the message row by discord_msg_id (M4 dedupe
 //     against the matching gateway echo that arrives via the
@@ -51,8 +59,12 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 			WriteError(w, err)
 			return
 		}
-		if req.Content == "" {
-			WriteError(w, errcode.New(errcode.InvalidArgument, "content is empty"))
+		// M7: an attachment-only message is allowed (Discord renders
+		// the file as the visible body). Content + zero attachments
+		// is the only invalid combination.
+		if req.Content == "" && len(req.Attachments) == 0 {
+			WriteError(w, errcode.New(errcode.InvalidArgument,
+				"content is empty and no attachments provided"))
 			return
 		}
 		priority := store.PriorityNormal
@@ -69,11 +81,24 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 			WriteError(w, errcode.New(errcode.Internal, "no actor in context"))
 			return
 		}
-		p, err := providerForActor(conn, actor.ID)
-		if err != nil {
-			WriteError(w, err)
-			return
-		}
+		// M7-P3-001 fix: attachment path / size validation must come
+		// AFTER room authorization, otherwise any authenticated token
+		// can probe daemon-local filesystem paths and file sizes via
+		// the response code (400 vs 413 vs ...). The cheap-rejection
+		// argument in the original M7 phase1 §3.3 doesn't outweigh
+		// the information leak. Order is now:
+		//   1) request-shape validation (already above)
+		//   2) WithTx: room exists + not archived + caller is member
+		//      (or admin) + reply target resolution
+		//   3) attachment stat + per-file size guard (NEW position)
+		//   4) acquire Provider
+		//   5) Provider.SendMessage
+		// Reserve `uploads` / `uploadSizes` here so the assemble step
+		// below can populate them after authz succeeds.
+		var (
+			uploads     []bot.UploadFile
+			uploadSizes []int64
+		)
 
 		// Resolve room + actor role + membership + reply target inside
 		// a quick read-only WithTx so we don't accidentally see a torn
@@ -129,9 +154,61 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 			return
 		}
 
+		// M7 attachment pre-flight — runs AFTER authz (room exists +
+		// member-or-admin). The per-file size guard fixes the
+		// M7-P3-002 spec mismatch: the 25 MB ceiling is per file,
+		// not aggregate. A multi-file message can exceed the sum so
+		// long as no single file is oversize. (Discord's actual
+		// upload behaviour matches this; the aggregate cap was an
+		// over-tight implementation choice in the original M7.)
+		uploads = make([]bot.UploadFile, 0, len(req.Attachments))
+		uploadSizes = make([]int64, 0, len(req.Attachments))
+		for _, a := range req.Attachments {
+			if a.Path == "" {
+				WriteError(w, errcode.New(errcode.InvalidArgument,
+					"attachment.path is required"))
+				return
+			}
+			fi, statErr := os.Stat(a.Path)
+			if statErr != nil {
+				WriteError(w, errcode.Wrap(statErr, errcode.InvalidArgument,
+					"stat attachment %s", a.Path))
+				return
+			}
+			if fi.IsDir() {
+				WriteError(w, errcode.New(errcode.InvalidArgument,
+					"attachment %s is a directory", a.Path))
+				return
+			}
+			sz := fi.Size()
+			if sz > DiscordAttachmentLimit {
+				WriteError(w, errcode.New(errcode.AttachmentTooLarge,
+					"attachment %s exceeds Discord 25MB per-file limit (%d bytes)",
+					a.Path, sz))
+				return
+			}
+			fname := a.Filename
+			if fname == "" {
+				fname = filepath.Base(a.Path)
+			}
+			uploads = append(uploads, bot.UploadFile{
+				Path:     a.Path,
+				FileName: fname,
+				MIME:     a.MIME,
+			})
+			uploadSizes = append(uploadSizes, sz)
+		}
+
+		p, err := providerForActor(conn, actor.ID)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+
 		// Slow: Discord send. Outside tx.
 		sent, err := p.SendMessage(r.Context(), room.DiscordChannelID, req.Content, bot.SendOptions{
 			ReplyToMessageID: replyDiscord,
+			Attachments:      uploads,
 		})
 		if err != nil {
 			WriteError(w, err)
@@ -232,6 +309,48 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 			}); err != nil {
 				return err
 			}
+			// M7: persist attachment rows. local_path = the source
+			// path the caller passed (already on the daemon's
+			// filesystem); downloaded_at = now (no fetch needed for
+			// outbound). discord_url comes from the Provider response
+			// — Discord assigns a CDN URL after upload completes, so
+			// downstream consumers can re-fetch via the URL if the
+			// local file is removed.
+			if len(uploads) > 0 {
+				nowAtt := time.Now().UTC()
+				for i, u := range uploads {
+					attID, idErr := uuid.NewV7()
+					if idErr != nil {
+						return errcode.Wrap(idErr, errcode.Internal, "uuidv7 for attachment")
+					}
+					var (
+						discordURL string
+						sentName   string
+					)
+					if i < len(sent.Attachments) {
+						discordURL = sent.Attachments[i].URL
+						sentName = sent.Attachments[i].Filename
+					}
+					fname := u.FileName
+					if sentName != "" {
+						fname = sentName
+					}
+					row := &store.Attachment{
+						ID:           attID.String(),
+						MessageID:    effectiveID,
+						Filename:     fname,
+						Size:         uploadSizes[i],
+						MIME:         u.MIME,
+						LocalPath:    u.Path,
+						DiscordURL:   discordURL,
+						DownloadedAt: &nowAtt,
+						CreatedAt:    nowAtt,
+					}
+					if err := b.Attachments.Create(r.Context(), row); err != nil {
+						return err
+					}
+				}
+			}
 			return recorder.RecordVia(r.Context(), b.Audit, actor.ID,
 				audit.ActionMessageSend, effectiveID, map[string]any{
 					"room_id":          roomID,
@@ -239,6 +358,7 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 					"requires_ack":     req.RequiresAck,
 					"priority":         string(priority),
 					"mention_all":      req.MentionAll,
+					"attachments":      len(uploads),
 					"race_with_ingest": !inserted,
 				})
 		}); err != nil {
@@ -249,8 +369,36 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 		// everyone's state (unread, mentions, priority feeds). M5
 		// debounce coalesces bursts.
 		go publishRoomMembers(bus, bundler, roomID)
-		WriteJSON(w, http.StatusCreated, MessageToResponse(persisted))
+		// Hydrate attachments onto the response so the caller can see
+		// the persisted rows (with discord_url) immediately.
+		resp := MessageToResponse(persisted)
+		if atts, herr := hydrateAttachments(r.Context(), bundler, persisted.ID); herr == nil {
+			resp.Attachments = atts
+		}
+		WriteJSON(w, http.StatusCreated, resp)
 	}
+}
+
+// hydrateAttachments fetches and DTO-converts the attachments for one
+// message id. Errors collapse to an empty slice (the message itself
+// already committed; missing attachments shouldn't fail the response).
+func hydrateAttachments(ctx context.Context, bundler store.Bundler, messageID string) ([]AttachmentResponse, error) {
+	var atts []*store.Attachment
+	if err := bundler.WithTx(ctx, func(b store.Bundle) error {
+		got, err := b.Attachments.ListByMessage(ctx, messageID)
+		if err != nil {
+			return err
+		}
+		atts = got
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	out := make([]AttachmentResponse, 0, len(atts))
+	for _, a := range atts {
+		out = append(out, AttachmentToResponse(a))
+	}
+	return out, nil
 }
 
 // publishRoomMembers fetches the room's current members and calls
@@ -331,9 +479,35 @@ func ListMessages(bundler store.Bundler) http.HandlerFunc {
 			WriteError(w, err)
 			return
 		}
+		// M7: batch-load attachments for all returned messages in one
+		// round-trip to keep ListMessages O(1) DB calls regardless
+		// of attachment count.
+		ids := make([]string, 0, len(messages))
+		for _, m := range messages {
+			ids = append(ids, m.ID)
+		}
+		var attByMsg map[string][]*store.Attachment
+		if len(ids) > 0 {
+			_ = bundler.WithTx(r.Context(), func(b store.Bundle) error {
+				m, err := b.Attachments.ListByMessages(r.Context(), ids)
+				if err != nil {
+					return err
+				}
+				attByMsg = m
+				return nil
+			})
+		}
+
 		out := MessageListResponse{Messages: make([]MessageResponse, 0, len(messages))}
 		for _, m := range messages {
-			out.Messages = append(out.Messages, MessageToResponse(m))
+			resp := MessageToResponse(m)
+			if rows, ok := attByMsg[m.ID]; ok && len(rows) > 0 {
+				resp.Attachments = make([]AttachmentResponse, 0, len(rows))
+				for _, a := range rows {
+					resp.Attachments = append(resp.Attachments, AttachmentToResponse(a))
+				}
+			}
+			out.Messages = append(out.Messages, resp)
 		}
 		WriteJSON(w, http.StatusOK, out)
 	}

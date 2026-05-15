@@ -18,6 +18,7 @@ import (
 
 	"github.com/LinZiyang666/agentchat/internal/account"
 	"github.com/LinZiyang666/agentchat/internal/api"
+	"github.com/LinZiyang666/agentchat/internal/attachment"
 	"github.com/LinZiyang666/agentchat/internal/audit"
 	"github.com/LinZiyang666/agentchat/internal/auth"
 	"github.com/LinZiyang666/agentchat/internal/bot"
@@ -126,6 +127,18 @@ func runServe(ctx context.Context) error {
 	// publishes to the state bus so watchers see new inbound
 	// messages.
 	ingester := message.New(conn, db, log, stateBus)
+
+	// M7 attachment downloader. Polls the attachments table for
+	// rows whose downloaded_at IS NULL and fetches the bytes into
+	// `<data-root>/attachments/<message-id>/<attachment-id>/<filename>`.
+	// Stops cleanly on parent ctx cancel.
+	attDir := filepath.Join(cfg.DataRoot, "attachments")
+	if err := os.MkdirAll(attDir, 0o700); err != nil {
+		return errcode.Wrap(err, errcode.Internal, "create attachments dir")
+	}
+	downloader := attachment.New(db.Bundle(), attDir, log, attachment.Options{})
+	downloader.Start(ctx)
+	defer downloader.Shutdown()
 
 	if err := bootstrapRoot(ctx, accountSvc, authMgr); err != nil {
 		return err

@@ -225,3 +225,21 @@ type SystemAnnouncementRead struct {
 	AccountID string
 	ReadAt    time.Time
 }
+
+// Attachment is one file attached to a persisted message (M7).
+// LocalPath stays empty until the daemon's downloader finishes the
+// inbound fetch (or, for outbound attachments, is set immediately to
+// the path the caller uploaded from). DownloadedAt mirrors that
+// availability — nil means "not yet on disk".
+type Attachment struct {
+	ID           string
+	MessageID    string
+	Filename     string
+	Size         int64
+	MIME         string
+	LocalPath    string
+	DiscordURL   string
+	DownloadedAt *time.Time
+	SHA256       string
+	CreatedAt    time.Time
+}

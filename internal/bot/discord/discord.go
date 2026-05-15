@@ -17,6 +17,8 @@ package discord
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -189,26 +191,80 @@ func (p *Provider) Events() <-chan bot.Event {
 }
 
 // SendMessage delivers content to channelID. opts.ReplyToMessageID, if
-// set, makes the message a Discord reply.
+// set, makes the message a Discord reply. opts.Attachments, if
+// non-empty, uploads the files alongside the message via
+// ChannelMessageSendComplex.
+//
+// Each upload file is opened, its bytes streamed to Discord, and the
+// caller's *os.File closed when SendMessage returns. The CLI / API
+// layer is responsible for the Discord 25 MB size check; if the
+// aggregate exceeds the limit, Discord rejects with HTTP 413 which
+// surfaces as Unavailable.
 func (p *Provider) SendMessage(_ context.Context, channelID, content string, opts bot.SendOptions) (*bot.Message, error) {
 	s, err := p.requireSession()
 	if err != nil {
 		return nil, err
 	}
-	var (
-		msg *discordgo.Message
-		e   error
-	)
+	// Fast path: no attachments → keep the two existing helper APIs
+	// (lower latency / simpler error tracebacks).
+	if len(opts.Attachments) == 0 {
+		var (
+			msg *discordgo.Message
+			e   error
+		)
+		if opts.ReplyToMessageID != "" {
+			msg, e = s.ChannelMessageSendReply(channelID, content, &discordgo.MessageReference{
+				MessageID: opts.ReplyToMessageID,
+				ChannelID: channelID,
+			})
+		} else {
+			msg, e = s.ChannelMessageSend(channelID, content)
+		}
+		if e != nil {
+			return nil, errcode.Wrap(e, errcode.Unavailable, "send discord message")
+		}
+		return discordToMessage(msg), nil
+	}
+	// Attachment path. Open each file once, defer close, then issue
+	// a single ChannelMessageSendComplex call.
+	files := make([]*discordgo.File, 0, len(opts.Attachments))
+	openHandles := make([]*os.File, 0, len(opts.Attachments))
+	defer func() {
+		for _, h := range openHandles {
+			_ = h.Close()
+		}
+	}()
+	for _, a := range opts.Attachments {
+		f, err := os.Open(a.Path)
+		if err != nil {
+			return nil, errcode.Wrap(err, errcode.InvalidArgument,
+				"open attachment %s", a.Path)
+		}
+		openHandles = append(openHandles, f)
+		name := a.FileName
+		if name == "" {
+			name = filepath.Base(a.Path)
+		}
+		df := &discordgo.File{
+			Name:        name,
+			ContentType: a.MIME,
+			Reader:      f,
+		}
+		files = append(files, df)
+	}
+	send := &discordgo.MessageSend{
+		Content: content,
+		Files:   files,
+	}
 	if opts.ReplyToMessageID != "" {
-		msg, e = s.ChannelMessageSendReply(channelID, content, &discordgo.MessageReference{
+		send.Reference = &discordgo.MessageReference{
 			MessageID: opts.ReplyToMessageID,
 			ChannelID: channelID,
-		})
-	} else {
-		msg, e = s.ChannelMessageSend(channelID, content)
+		}
 	}
+	msg, e := s.ChannelMessageSendComplex(channelID, send)
 	if e != nil {
-		return nil, errcode.Wrap(e, errcode.Unavailable, "send discord message")
+		return nil, errcode.Wrap(e, errcode.Unavailable, "send discord message with attachments")
 	}
 	return discordToMessage(msg), nil
 }
@@ -395,11 +451,26 @@ func discordToMessage(m *discordgo.Message) *bot.Message {
 	if m.Author != nil {
 		author = m.Author.ID
 	}
-	return &bot.Message{
+	out := &bot.Message{
 		ID:        m.ID,
 		ChannelID: m.ChannelID,
 		AuthorID:  author,
 		Content:   m.Content,
 		CreatedAt: m.Timestamp,
 	}
+	if len(m.Attachments) > 0 {
+		out.Attachments = make([]bot.MsgAttachURL, 0, len(m.Attachments))
+		for _, a := range m.Attachments {
+			if a == nil {
+				continue
+			}
+			out.Attachments = append(out.Attachments, bot.MsgAttachURL{
+				Filename: a.Filename,
+				URL:      a.URL,
+				Size:     int64(a.Size),
+				MIME:     a.ContentType,
+			})
+		}
+	}
+	return out
 }

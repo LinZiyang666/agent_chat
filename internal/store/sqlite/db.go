@@ -75,6 +75,7 @@ func (s *Store) Bundle() store.Bundle {
 		AnnouncementReads:       &announcementReadRepo{db: s.db},
 		SystemAnnouncements:     &systemAnnouncementRepo{db: s.db},
 		SystemAnnouncementReads: &systemAnnouncementReadRepo{db: s.db},
+		Attachments:             &attachmentRepo{db: s.db},
 	}
 }
 
@@ -117,6 +118,7 @@ func (s *Store) WithTx(ctx context.Context, fn func(b store.Bundle) error) error
 		AnnouncementReads:       &announcementReadRepo{db: tx},
 		SystemAnnouncements:     &systemAnnouncementRepo{db: tx},
 		SystemAnnouncementReads: &systemAnnouncementReadRepo{db: tx},
+		Attachments:             &attachmentRepo{db: tx},
 	}
 	if err := fn(txBundle); err != nil {
 		return err

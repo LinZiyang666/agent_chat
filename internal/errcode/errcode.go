@@ -43,6 +43,11 @@ const (
 	Internal Code = "INTERNAL"
 	// Unavailable means a transient condition: try again later.
 	Unavailable Code = "UNAVAILABLE"
+
+	// AttachmentTooLarge (M7) means an outbound attachment exceeded
+	// the Discord 25 MB per-message cap. The CLI maps this to its
+	// own exit code (22) so scripts can branch on it directly.
+	AttachmentTooLarge Code = "ATTACHMENT_TOO_LARGE"
 )
 
 // Error is the canonical error type produced by this codebase. It is JSON

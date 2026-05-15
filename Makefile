@@ -68,6 +68,7 @@ smoke: build
 	./e2e/m4-smoke.sh
 	./e2e/m5-smoke.sh
 	./e2e/m6-smoke.sh
+	./e2e/m7-smoke.sh
 
 clean:
 	rm -rf $(BIN_DIR) coverage.txt coverage.html

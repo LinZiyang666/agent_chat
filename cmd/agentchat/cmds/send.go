@@ -16,6 +16,7 @@ var (
 	flagSendPriority    string
 	flagSendFromFile    string
 	flagSendMentionAll  bool
+	flagSendAttach      []string
 )
 
 var sendCmd = &cobra.Command{
@@ -43,11 +44,20 @@ read from stdin via "--file -".`,
 				return err
 			}
 			content = string(b)
+		case len(flagSendAttach) > 0:
+			// Attachment-only message: empty content is fine, Discord
+			// renders the upload as the visible body.
+			content = ""
 		default:
-			return fmt.Errorf("provide message text as the second argument or via --file")
+			return fmt.Errorf("provide message text as the second argument, --file, or at least one --attach")
 		}
-		if content == "" {
+		if content == "" && len(flagSendAttach) == 0 {
 			return fmt.Errorf("content is empty")
+		}
+
+		atts := make([]client.SendAttachment, 0, len(flagSendAttach))
+		for _, p := range flagSendAttach {
+			atts = append(atts, client.SendAttachment{Path: p})
 		}
 
 		c := newClient()
@@ -56,6 +66,7 @@ read from stdin via "--file -".`,
 			RequiresAck: flagSendRequiresAck,
 			Priority:    flagSendPriority,
 			MentionAll:  flagSendMentionAll,
+			Attachments: atts,
 		})
 		if err != nil {
 			return err
@@ -79,5 +90,7 @@ func init() {
 		"read message content from this file; use '-' for stdin")
 	sendCmd.Flags().BoolVar(&flagSendMentionAll, "all", false,
 		"M6 @all: every member of the room sees this in their mentions feed")
+	sendCmd.Flags().StringArrayVar(&flagSendAttach, "attach", nil,
+		"M7: attach a local file to the message (repeatable; each file ≤ 25MB)")
 	rootCmd.AddCommand(sendCmd)
 }

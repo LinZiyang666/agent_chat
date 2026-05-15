@@ -222,6 +222,35 @@ func (i *Ingester) ingestNew(ingesterAccountID string, e bot.EventMessageNew) er
 			}
 			ids = append(ids, m.AccountID)
 		}
+
+		// M7: index any attachments the gateway reported for this
+		// message. local_path / sha256 stay empty + downloaded_at
+		// NULL — the downloader picks these rows up via
+		// AttachmentRepo.ListPendingDownloads, fetches the bytes,
+		// and calls MarkDownloaded when the file lands on disk.
+		// Same-tx insertion guarantees that observers reading
+		// attachments via /v1/rooms/{id}/messages right after the
+		// state-bus publish see the placeholder rows (with empty
+		// local_path) rather than nothing at all.
+		for _, att := range e.Message.Attachments {
+			attID, err := uuid.NewV7()
+			if err != nil {
+				return errcode.Wrap(err, errcode.Internal, "uuidv7 for attachment")
+			}
+			row := &store.Attachment{
+				ID:         attID.String(),
+				MessageID:  persistedID,
+				Filename:   att.Filename,
+				Size:       att.Size,
+				MIME:       att.MIME,
+				DiscordURL: att.URL,
+				CreatedAt:  time.Now().UTC(),
+			}
+			if err := b.Attachments.Create(ctx, row); err != nil {
+				return err
+			}
+		}
+
 		notify = ids
 		return nil
 	}); err != nil {

@@ -66,8 +66,8 @@ func CreateAnnouncement(conn *connector.Connector, bundler store.Bundler, record
 			return
 		}
 		var (
-			persisted  *store.Announcement
-			channelID  string
+			persisted *store.Announcement
+			channelID string
 		)
 		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {
 			room, err := b.Rooms.Get(r.Context(), roomID)

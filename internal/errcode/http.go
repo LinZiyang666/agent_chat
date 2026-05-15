@@ -23,6 +23,10 @@ func HTTPStatus(err error) int {
 		return http.StatusConflict
 	case InvalidArgument:
 		return http.StatusBadRequest
+	case AttachmentTooLarge:
+		// Maps to 413 so a Discord-savvy client can react without
+		// parsing the JSON body. Semantically still "invalid input".
+		return http.StatusRequestEntityTooLarge
 	case Unavailable:
 		return http.StatusServiceUnavailable
 	case Internal, Unspecified:

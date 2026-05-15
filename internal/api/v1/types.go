@@ -155,21 +155,51 @@ type SendMessageRequest struct {
 	// message in their mentions feed, in addition to the literal
 	// "<@bot_user_id>" content match. Off by default.
 	MentionAll bool `json:"mention_all,omitempty"`
+	// Attachments (M7) are local file paths the daemon reads and
+	// uploads to Discord alongside the message. Discord caps each file
+	// at 25 MB; oversize returns ATTACHMENT_TOO_LARGE.
+	Attachments []SendAttachmentRequest `json:"attachments,omitempty"`
+}
+
+// SendAttachmentRequest is one outbound file in SendMessageRequest.
+// Path is server-side (the daemon reads it). The CLI / agent is
+// responsible for providing a path the daemon can resolve — the
+// daemon does not do path translation.
+type SendAttachmentRequest struct {
+	Path     string `json:"path"`
+	Filename string `json:"filename,omitempty"`
+	MIME     string `json:"mime,omitempty"`
 }
 
 // MessageResponse is the public shape of a Message row.
 type MessageResponse struct {
-	ID              string    `json:"id"`
-	RoomID          string    `json:"room_id"`
-	AuthorAccountID string    `json:"author_account_id,omitempty"`
-	DiscordMsgID    string    `json:"discord_msg_id"`
-	Content         string    `json:"content"`
-	ReplyToMsgID    string    `json:"reply_to_msg_id,omitempty"`
-	RequiresAck     bool      `json:"requires_ack"`
-	Priority        string    `json:"priority"`
-	CreatedAt       time.Time `json:"created_at"`
-	ContentHash     string    `json:"content_hash"`
-	MentionAll      bool      `json:"mention_all,omitempty"`
+	ID              string               `json:"id"`
+	RoomID          string               `json:"room_id"`
+	AuthorAccountID string               `json:"author_account_id,omitempty"`
+	DiscordMsgID    string               `json:"discord_msg_id"`
+	Content         string               `json:"content"`
+	ReplyToMsgID    string               `json:"reply_to_msg_id,omitempty"`
+	RequiresAck     bool                 `json:"requires_ack"`
+	Priority        string               `json:"priority"`
+	CreatedAt       time.Time            `json:"created_at"`
+	ContentHash     string               `json:"content_hash"`
+	MentionAll      bool                 `json:"mention_all,omitempty"`
+	Attachments     []AttachmentResponse `json:"attachments,omitempty"`
+}
+
+// AttachmentResponse is the public shape of an Attachment row (M7).
+// LocalPath is empty until the downloader (inbound path) finishes
+// fetching the file; outbound attachments populate it immediately.
+type AttachmentResponse struct {
+	ID           string     `json:"id"`
+	MessageID    string     `json:"message_id"`
+	Filename     string     `json:"filename"`
+	Size         int64      `json:"size"`
+	MIME         string     `json:"mime,omitempty"`
+	LocalPath    string     `json:"local_path,omitempty"`
+	DiscordURL   string     `json:"discord_url,omitempty"`
+	DownloadedAt *time.Time `json:"downloaded_at,omitempty"`
+	SHA256       string     `json:"sha256,omitempty"`
 }
 
 // MessageListResponse is the body of GET /v1/rooms/{id}/messages.

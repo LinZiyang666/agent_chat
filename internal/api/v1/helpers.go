@@ -196,6 +196,28 @@ func SystemAnnouncementToResponse(a *store.SystemAnnouncement) SystemAnnouncemen
 	}
 }
 
+// AttachmentToResponse converts a store.Attachment into its DTO (M7).
+func AttachmentToResponse(a *store.Attachment) AttachmentResponse {
+	if a == nil {
+		return AttachmentResponse{}
+	}
+	out := AttachmentResponse{
+		ID:         a.ID,
+		MessageID:  a.MessageID,
+		Filename:   a.Filename,
+		Size:       a.Size,
+		MIME:       a.MIME,
+		LocalPath:  a.LocalPath,
+		DiscordURL: a.DiscordURL,
+		SHA256:     a.SHA256,
+	}
+	if a.DownloadedAt != nil {
+		v := a.DownloadedAt.UTC()
+		out.DownloadedAt = &v
+	}
+	return out
+}
+
 // MessageStateToResponse converts a store.MessageState into its public DTO.
 func MessageStateToResponse(s *store.MessageState) MessageStateResponse {
 	if s == nil {

@@ -235,6 +235,30 @@ type SystemAnnouncementReadRepo interface {
 	ListUnreadForAccount(ctx context.Context, accountID string, limit int) ([]*SystemAnnouncement, error)
 }
 
+// AttachmentRepo persists file-attachment index rows (M7). A row is
+// created when a message arrives carrying attachments (the inbound
+// path) or when the send path uploads a file. The downloader uses
+// ListPendingDownloads to discover work; MarkDownloaded commits the
+// local path + hash + downloaded_at when the file is fully on disk.
+type AttachmentRepo interface {
+	Create(ctx context.Context, a *Attachment) error
+	Get(ctx context.Context, id string) (*Attachment, error)
+	// ListByMessage returns every attachment for a message in
+	// stable order (insertion order via id).
+	ListByMessage(ctx context.Context, messageID string) ([]*Attachment, error)
+	// ListByMessages is the M7-fan-out variant: one round-trip
+	// returning all attachments for the given message ids, mapped
+	// by message_id. Used by ListMessages to avoid N+1.
+	ListByMessages(ctx context.Context, messageIDs []string) (map[string][]*Attachment, error)
+	// ListPendingDownloads returns attachments whose downloaded_at
+	// IS NULL (inbound fetch not yet complete). Newest-first,
+	// capped at limit (default 50).
+	ListPendingDownloads(ctx context.Context, limit int) ([]*Attachment, error)
+	// MarkDownloaded sets local_path, sha256, downloaded_at on an
+	// existing row. Used by the downloader once the file lands.
+	MarkDownloaded(ctx context.Context, id, localPath, sha256 string, at time.Time) error
+}
+
 // Bundle aggregates the repositories the daemon uses. Backends
 // (e.g. internal/store/sqlite) construct a Bundle so callers receive a
 // single value.
@@ -250,6 +274,7 @@ type Bundle struct {
 	AnnouncementReads       AnnouncementReadRepo
 	SystemAnnouncements     SystemAnnouncementRepo
 	SystemAnnouncementReads SystemAnnouncementReadRepo
+	Attachments             AttachmentRepo
 }
 
 // Bundler runs a closure inside a single backend-level transaction.

@@ -17,6 +17,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	apiv1 "github.com/LinZiyang666/agentchat/internal/api/v1"
@@ -458,18 +459,49 @@ type SendMessageOptions struct {
 	RequiresAck bool
 	Priority    string
 	MentionAll  bool
+	Attachments []SendAttachment
+}
+
+// SendAttachment is one outbound file attachment (M7). Path is
+// server-side (the daemon reads it directly); the daemon and CLI run
+// on the same host so unqualified relative paths resolve against the
+// CLI's CWD, but absolute paths are safest.
+type SendAttachment struct {
+	Path     string
+	Filename string
+	MIME     string
 }
 
 func (c *Client) SendMessage(ctx context.Context, roomID, content string, opts SendMessageOptions) (*apiv1.MessageResponse, error) {
 	var out apiv1.MessageResponse
+	req := apiv1.SendMessageRequest{
+		Content:     content,
+		ReplyToID:   opts.ReplyToID,
+		RequiresAck: opts.RequiresAck,
+		Priority:    opts.Priority,
+		MentionAll:  opts.MentionAll,
+	}
+	if len(opts.Attachments) > 0 {
+		// Resolve relative paths to absolute on the client side so
+		// the daemon (which may have a different CWD) sees a stable
+		// path. We keep symlinks intact.
+		req.Attachments = make([]apiv1.SendAttachmentRequest, 0, len(opts.Attachments))
+		for _, a := range opts.Attachments {
+			abs := a.Path
+			if !filepath.IsAbs(a.Path) {
+				if p, err := filepath.Abs(a.Path); err == nil {
+					abs = p
+				}
+			}
+			req.Attachments = append(req.Attachments, apiv1.SendAttachmentRequest{
+				Path:     abs,
+				Filename: a.Filename,
+				MIME:     a.MIME,
+			})
+		}
+	}
 	if err := c.do(ctx, http.MethodPost, "/v1/rooms/"+roomID+"/messages",
-		apiv1.SendMessageRequest{
-			Content:     content,
-			ReplyToID:   opts.ReplyToID,
-			RequiresAck: opts.RequiresAck,
-			Priority:    opts.Priority,
-			MentionAll:  opts.MentionAll,
-		}, &out); err != nil {
+		req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
