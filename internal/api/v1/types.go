@@ -156,8 +156,9 @@ type SendMessageRequest struct {
 	// "<@bot_user_id>" content match. Off by default.
 	MentionAll bool `json:"mention_all,omitempty"`
 	// Attachments (M7) are local file paths the daemon reads and
-	// uploads to Discord alongside the message. Discord caps each file
-	// at 25 MB; oversize returns ATTACHMENT_TOO_LARGE.
+	// uploads to Discord alongside the message. Discord caps each
+	// file at 10 MB on the free tier (lowered from 25 MB in
+	// 2024-09); per-file oversize returns ATTACHMENT_TOO_LARGE.
 	Attachments []SendAttachmentRequest `json:"attachments,omitempty"`
 }
 

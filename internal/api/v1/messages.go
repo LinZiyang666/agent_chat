@@ -22,10 +22,17 @@ import (
 	"github.com/LinZiyang666/agentchat/internal/store"
 )
 
-// DiscordAttachmentLimit is the per-file Discord upload cap. M7
-// enforces this server-side: any attachment larger than this returns
-// ATTACHMENT_TOO_LARGE.
-const DiscordAttachmentLimit = 25 * 1024 * 1024
+// DiscordAttachmentLimit is the Discord free-tier per-file upload
+// cap. Discord lowered this from 25 MB to 10 MB in 2024-09 (see
+// https://hardware.slashdot.org/story/24/09/05/0149255 and the
+// Discord support article). M7 enforces this server-side per
+// attachment: any single file larger than this returns
+// `ATTACHMENT_TOO_LARGE`. Boosted guilds (level 2 / level 3) and
+// Nitro callers may actually upload more; the agentchat-side
+// guard stays at the floor so the failure mode is a deterministic
+// 413 from us rather than a noisy 503 from Discord. Operators
+// running on a boosted guild can patch this constant locally.
+const DiscordAttachmentLimit = 10 * 1024 * 1024
 
 // SendMessage handles POST /v1/rooms/{id}/messages.
 //
@@ -155,12 +162,11 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 		}
 
 		// M7 attachment pre-flight — runs AFTER authz (room exists +
-		// member-or-admin). The per-file size guard fixes the
-		// M7-P3-002 spec mismatch: the 25 MB ceiling is per file,
-		// not aggregate. A multi-file message can exceed the sum so
-		// long as no single file is oversize. (Discord's actual
-		// upload behaviour matches this; the aggregate cap was an
-		// over-tight implementation choice in the original M7.)
+		// member-or-admin). The per-file size guard enforces the
+		// `DiscordAttachmentLimit` constant per attachment, not
+		// aggregate (M7-P3-002 fix). The current value tracks
+		// Discord's free-tier per-file cap (10 MB as of 2024-09 —
+		// see the constant doc above).
 		uploads = make([]bot.UploadFile, 0, len(req.Attachments))
 		uploadSizes = make([]int64, 0, len(req.Attachments))
 		for _, a := range req.Attachments {
@@ -183,8 +189,8 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 			sz := fi.Size()
 			if sz > DiscordAttachmentLimit {
 				WriteError(w, errcode.New(errcode.AttachmentTooLarge,
-					"attachment %s exceeds Discord 25MB per-file limit (%d bytes)",
-					a.Path, sz))
+					"attachment %s exceeds Discord per-file limit (%d bytes > %d)",
+					a.Path, sz, DiscordAttachmentLimit))
 				return
 			}
 			fname := a.Filename

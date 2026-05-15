@@ -197,7 +197,8 @@ func (p *Provider) Events() <-chan bot.Event {
 //
 // Each upload file is opened, its bytes streamed to Discord, and the
 // caller's *os.File closed when SendMessage returns. The CLI / API
-// layer is responsible for the Discord 25 MB size check; if the
+// layer is responsible for the Discord per-file size check (free
+// tier 10 MB as of 2024-09; boosted guilds higher); if the
 // aggregate exceeds the limit, Discord rejects with HTTP 413 which
 // surfaces as Unavailable.
 func (p *Provider) SendMessage(_ context.Context, channelID, content string, opts bot.SendOptions) (*bot.Message, error) {

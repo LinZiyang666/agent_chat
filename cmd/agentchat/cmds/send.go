@@ -91,6 +91,6 @@ func init() {
 	sendCmd.Flags().BoolVar(&flagSendMentionAll, "all", false,
 		"M6 @all: every member of the room sees this in their mentions feed")
 	sendCmd.Flags().StringArrayVar(&flagSendAttach, "attach", nil,
-		"M7: attach a local file to the message (repeatable; each file ≤ 25MB)")
+		"M7: attach a local file (repeatable; per-file ≤ 10 MB on free Discord servers, lowered from 25 MB in 2024-09)")
 	rootCmd.AddCommand(sendCmd)
 }

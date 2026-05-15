@@ -36,8 +36,14 @@ func TestPhase3AttachmentAuthzRunsBeforeSizePreflight(t *testing.T) {
 func TestPhase3AttachmentLimitIsPerFileNotAggregate(t *testing.T) {
 	env := newM5Env(t)
 	room := env.onlineAdminAndCreateRoom(t, "phase3-attach-limit")
-	first := phase3SparseFile(t, "first.bin", 14*1024*1024)
-	second := phase3SparseFile(t, "second.bin", 14*1024*1024)
+	// File sizes adjusted to bracket the NEW 10 MB per-file limit
+	// (DiscordAttachmentLimit was lowered from 25 MB to 10 MB after
+	// Discord's 2024-09 free-tier cut). Each file 6 MiB < 10 MB so
+	// per-file passes; aggregate 12 MiB > 10 MB so this still
+	// distinguishes per-file vs aggregate semantics — the original
+	// intent of the test.
+	first := phase3SparseFile(t, "first.bin", 6*1024*1024)
+	second := phase3SparseFile(t, "second.bin", 6*1024*1024)
 
 	resp, body := env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/messages",
 		apiv1.SendMessageRequest{

@@ -439,3 +439,58 @@ git diff --check
 Results: all PASS / clean.
 
 I did not run full `test-race` or coverage in this final re-review. The M7-specific blocker / major / retry findings are closed from the auditor side.
+
+## Resolution round 3 — `DiscordAttachmentLimit` lowered 25 MB → 10 MB
+
+**Decision (user-driven, post-PASS):** Discord lowered the
+free-tier per-file upload cap from 25 MB to 10 MB in 2024-09. The
+M7 implementation matched the old 25 MB value because the
+roadmap / requirements were written against the older Discord
+limit. Real-Discord testing today surfaced the gap (a 2 × 14 MiB
+message passed agentchat's per-file 25 MB guard, then was 503-ed
+by Discord). The user picked option A from the in-chat menu:
+update the constant to 10 MB.
+
+**Code change:** `internal/api/v1/messages.go::DiscordAttachmentLimit`
+now `10 * 1024 * 1024`. Comment explains the lowering + the
+historical 25 MB value. Error message rewritten to print the
+actual cap dynamically (no more `25MB` literal).
+
+**Doc / comment updates:** `internal/errcode/errcode.go`,
+`internal/bot/discord/discord.go`, `internal/api/v1/types.go`,
+`cmd/agentchat/cmds/send.go --attach help text`, `M7-phase1.md`
+Goal / §3.3 / auth matrix — all reference the new value with a
+pointer to the constant.
+
+**Test fixture update:** The auditor's
+`TestPhase3AttachmentLimitIsPerFileNotAggregate` originally used
+2 × 14 MiB files (each < 25 MB, aggregate > 25 MB). With the
+limit lowered to 10 MB, those values would *correctly* reject as
+per-file oversize, defeating the test's intent. Fixtures
+rebracketed to 2 × 6 MiB (each < 10 MB, aggregate 12 MiB > 10 MB)
+so the per-file vs aggregate distinction still loads. Inline
+comment in the test explains the adjustment. Other audit
+fixtures (26 MiB single-file oversize) still trigger oversize
+under the new value — no change needed.
+
+**Not touched:** `docs/02-requirements-final.md` §3.4 still says
+"~25 MB / 文件". This is a baseline product doc; the user can
+choose to reconcile it (e.g., "~10 MB / 文件 on free Discord
+servers as of 2024-09") in a separate pass.
+
+**Operator escape hatch:** boosted Discord guilds support
+50 MB / 100 MB per file; Nitro callers go higher. Operators on
+such servers can patch `DiscordAttachmentLimit` locally. A
+config-driven knob (option C in the original menu) was discussed
+but not adopted in this round — the simpler floor matches what
+99 % of self-hosted operators will hit first.
+
+**Gate after round 3:**
+
+```
+go build ./...                          clean
+gofmt -l internal cmd pkg               clean
+go test ./internal/api ./internal/...   PASS (incl. auditor's
+                                              re-bracketed test)
+bash e2e/m7-smoke.sh                    PASS
+```

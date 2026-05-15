@@ -45,8 +45,10 @@ const (
 	Unavailable Code = "UNAVAILABLE"
 
 	// AttachmentTooLarge (M7) means an outbound attachment exceeded
-	// the Discord 25 MB per-message cap. The CLI maps this to its
-	// own exit code (22) so scripts can branch on it directly.
+	// the Discord per-file upload cap (free-tier 10 MB as of
+	// 2024-09; boosted guilds may allow more — see
+	// `internal/api/v1/messages.go::DiscordAttachmentLimit`). The
+	// CLI maps this to exit code 22 so scripts can branch on it.
 	AttachmentTooLarge Code = "ATTACHMENT_TOO_LARGE"
 )
 

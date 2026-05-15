@@ -51,8 +51,9 @@ func TestSendMessageWithAttachmentPersistsRow(t *testing.T) {
 func TestSendMessageAttachmentTooLargeReturns413(t *testing.T) {
 	env := newM5Env(t)
 	room := env.onlineAdminAndCreateRoom(t, "att-big")
-	// 26 MB > Discord 25 MB cap. Use a sparse-ish allocation; we
-	// only stat the size, never read the bytes.
+	// 26 MB > Discord per-file cap (DiscordAttachmentLimit, currently
+	// 10 MB after the 2024-09 free-tier cut). Allocation never reads
+	// the bytes — only os.Stat fires before SendMessage returns 413.
 	big := make([]byte, 26*1024*1024)
 	p := writeTempFile(t, "huge.bin", big)
 

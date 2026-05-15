@@ -9,7 +9,11 @@
 
 **Date:** 2026-05-14
 **Milestone scope:** `04-roadmap.md` §8 — daemon-side attachment
-download + index + outbound upload with the Discord 25 MB cap.
+download + index + outbound upload with the Discord per-file cap.
+(`DiscordAttachmentLimit` constant — 10 MB on free Discord servers
+as of 2024-09; was 25 MB during the M7 implementation, lowered by
+the user-driven update documented in `M7-phase3.md` §Resolution
+round 3.)
 
 ## 1. Goal recap
 
@@ -18,10 +22,12 @@ Two halves:
 - **Outbound** — `agentchat send <room> --attach <file>` reads a
   local file, the daemon uploads it via Provider, and the resulting
   Discord attachment metadata (filename, size, CDN URL) is indexed.
-  Each file > 25 MB returns `ATTACHMENT_TOO_LARGE` (HTTP 413, exit
-  22). Multi-file payloads are bounded per-file, not aggregate
-  (M7-P3-002 fix; the initial implementation summed sizes — the
-  correct boundary per `02-requirements-final.md` §3.4 is per file).
+  Each file > `DiscordAttachmentLimit` (currently 10 MB on free
+  Discord servers, lowered from 25 MB in 2024-09) returns
+  `ATTACHMENT_TOO_LARGE` (HTTP 413, exit 22). Multi-file payloads
+  are bounded per-file, not aggregate (M7-P3-002 fix; the initial
+  implementation summed sizes — the correct boundary per
+  `02-requirements-final.md` §3.4 is per file).
 - **Inbound** — gateway messages carrying attachments produce
   `attachments` rows with `downloaded_at = NULL`; the background
   downloader fetches each file into
@@ -124,9 +130,10 @@ phase1 §3.3 which had the guard run first):
 - **Pre-Provider second** — the size guard still runs before bot
   acquisition so an offline bot doesn't mask a bad attachment with
   a confusing `CONFLICT: no live Discord provider`.
-- **Per-file, not aggregate** — Discord's per-message-attachment
-  cap is `~25 MB / 文件`; checking the aggregate would reject a
-  legitimate 2×14 MB message. See M7-P3-002 fix in
+- **Per-file, not aggregate** — Discord's per-attachment cap is
+  per-file (currently 10 MB free, was 25 MB pre-2024-09); checking
+  the aggregate would reject a legitimate multi-file message even
+  when no single file is oversize. See M7-P3-002 fix in
   `M7-phase3.md` §Resolution.
 
 ### 3.4 Outbound `discord_url` may lag behind the response
@@ -155,7 +162,7 @@ show them. The M6 mirror is the exception, not the rule.
 | `POST /v1/rooms/{id}/messages` with `attachments: [...]` | Same as regular send (member + admin); plus M7 size check |
 | `GET /v1/rooms/{id}/messages` | Same as M4; response now hydrates `attachments[]` |
 | Downloader (no HTTP endpoint) | Internal goroutine; no auth surface |
-| Any single file > 25 MB | `ATTACHMENT_TOO_LARGE` → HTTP 413, exit 22 (per-file, not aggregate — M7-P3-002 fix) |
+| Any single file > `DiscordAttachmentLimit` (currently 10 MB) | `ATTACHMENT_TOO_LARGE` → HTTP 413, exit 22 (per-file, not aggregate — M7-P3-002 fix) |
 | Per-file inbound > 50 MiB cap | Downloader skips silently (row keeps `downloaded_at = NULL`, retried next cycle); log line at WARN |
 
 ## 5. Out of scope (deferred)
