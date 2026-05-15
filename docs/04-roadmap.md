@@ -52,7 +52,7 @@
 把目录、构建系统、入口都搭起来，**能 `go build` 出两个空的可执行文件**。
 
 ### 范围
-- `go mod init github.com/LinZiyang666/agentchat`（Go 1.22+）
+- `go mod init github.com/LinZiyang666/agentchat`（Go 1.25+，M2 由 golang.org/x/crypto 升级带起）
 - 建出 `03-architecture.md §8` 全部目录（每个包先放 `doc.go` 占位）
 - `cmd/agentchat/main.go`：cobra root，挂一个空 `version` 子命令
 - `cmd/agentchatd/main.go`：cobra root，挂一个空 `version` 子命令
@@ -94,7 +94,7 @@ daemon 能起来、CLI 能通过 token 操作账号系统的完整 CRUD。**Disc
   2. 打开 SQLite（modernc/sqlite），跑 migrations
   3. **如果 accounts 表为空**：自动建 root admin + 生成首启 token，**打印到 stdout**
   4. 监听 Unix Socket `~/.agentchat/agentchatd.sock`，chmod 600
-- SQLite 迁移文件 v1（在 `internal/store/migrations/`）：
+- SQLite 迁移文件 v1（在 `internal/store/sqlite/migrations/`）：
   - `accounts(id, name, role, bot_token_enc, lifecycle_state, created_at, ...)`
   - `tokens(id, account_id, token_hash, created_at, revoked_at, last_used_at)`
   - `audit_log(id, account_id, action, target, payload_json, created_at)`
@@ -447,13 +447,15 @@ $ ./bin/agentchat admin system-announce "维护通知：本周日 2:00 重启"
 
 #### 下载器
 - `internal/attachment/downloader.go`：订阅 message_new 事件 → 看附件 → 异步下载 → 落 `local_path`
-- 路径：`~/.agentchat/attachments/<room-id>/<message-id>/<filename>`
-- 失败重试 + 退避
-- 大文件先发 HEAD 拿 Content-Length 校验
+- 路径：`~/.agentchat/attachments/<message-id>/<attachment-id>/<filename>`
+  （实现采用 message-id + attachment-id 双层，避免一个 message 含多个同名文件冲突；`attachment-id` 为 UUIDv7。落地后所有 dir 0o700、files 0o600 — M8-S-P2-002.）
+- 失败重试 + 指数退避（2s, 4s, 8s … 上限 120s；M7-P3-003/004，攻击者无法通过 attempts 大数字让 `1<<n` 溢出回 0）
+- 下载后 verify `n == a.Size`（M8-S-P2-003），fsync 再 rename（M8-Q-P1-004）
+- 早期 spec 提到 "大文件先发 HEAD 拿 Content-Length 校验"，实际未实现 — discordgo 不暴露 HEAD，且 LimitReader + size 验证已经覆盖该路径
 
 #### API
 - `GET /v1/rooms/{id}/messages` 响应里附件部分含 `local_path` 和 `discord_url`
-- `POST /v1/messages` body 支持 `attachments: [{path: "/local/file"}]` → daemon 读本地文件上传到 Discord（**校验大小 ≤ 25MB**，超限返回错误码 `ATTACHMENT_TOO_LARGE`）
+- `POST /v1/rooms/{id}/messages` body 支持 `attachments: [{path: "/local/file"}]` → daemon 读本地文件上传到 Discord（**单文件 ≤ `DiscordAttachmentLimit` (10 MB，2024-09 后 Discord 免费层下调)**，超限返回错误码 `ATTACHMENT_TOO_LARGE`/HTTP 413。Lstat 拒绝 symlink — M8-S-P2-004）
 
 #### CLI
 ```

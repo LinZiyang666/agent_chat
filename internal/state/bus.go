@@ -6,7 +6,17 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/LinZiyang666/agentchat/internal/errcode"
 )
+
+// MaxSubscribersPerAccount caps the number of concurrent state-watch
+// subscribers per account. A single token holding many concurrent
+// streams would otherwise hold N goroutines + N channels + an SQLite
+// connection per BuildNow indefinitely (M8-S-P2-008). 8 is generous
+// for normal agents and tight enough that a runaway script cannot
+// silently exhaust resources.
+const MaxSubscribersPerAccount = 8
 
 // Bus is the M5 state-fan-out engine. It:
 //
@@ -87,6 +97,11 @@ func (s *Subscription) AccountID() string { return s.accountID }
 func (b *Bus) Subscribe(ctx context.Context, accountID string) (*Subscription, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if len(b.subs[accountID]) >= MaxSubscribersPerAccount {
+		return nil, errcode.New(errcode.ResourceExhausted,
+			"account %s already has %d active state subscribers (cap %d)",
+			accountID, len(b.subs[accountID]), MaxSubscribersPerAccount)
+	}
 	initial, err := b.buildNowLocked(ctx, accountID)
 	if err != nil {
 		return nil, err

@@ -19,7 +19,13 @@ import (
 // slightly slower verification (~150ms on commodity hardware) in
 // exchange for stronger brute-force resistance. CLI auth latency stays
 // well below the human-perception threshold even at this cost.
-const APITokenCost = 12
+//
+// **var, not const** so the test binary can lower it via TestMain
+// (M8-Q-P1-008 fix): production cost 12 × 30+ token issuances × 5x
+// race-detector overhead = ~1000s of test wall-time per package. Test
+// builds set bcrypt.MinCost (4) for a 256x speedup. Production builds
+// never touch this — it stays at 12.
+var APITokenCost = 12
 
 // SecretLen is the number of random bytes used in the secret half of an
 // API token (the bcrypt-hashed portion). 32 bytes (256 bits) is far

@@ -50,6 +50,12 @@ const (
 	ActionAnnouncementRead   Action = "announcement.read"
 	ActionSystemAnnCreate    Action = "system_announcement.create"
 	ActionSystemAnnRead      Action = "system_announcement.read"
+
+	// M8 actions: diagnostic debug paths that previously bypassed audit
+	// (M8-S-P2-013). Admin-only at the router; audit row gives operators
+	// a single source of truth for "who did what" including diagnostic
+	// channels.
+	ActionDebugSend Action = "debug.send"
 )
 
 // Deprecated aliases retained so older payloads (or external readers

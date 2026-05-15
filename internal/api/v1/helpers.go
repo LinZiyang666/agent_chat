@@ -3,14 +3,22 @@ package v1
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
-	"github.com/LinZiyang666/agentchat/internal/audit"
-	"github.com/LinZiyang666/agentchat/internal/auth"
 	"github.com/LinZiyang666/agentchat/internal/errcode"
 	"github.com/LinZiyang666/agentchat/internal/store"
 )
+
+// MaxRequestBodyBytes caps every JSON request body. Chat messages and
+// announcement content are at most a few KiB; the cap blocks the
+// "POST huge body to OOM the daemon" attack reachable by any
+// authenticated client. Streaming endpoints (`/state/watch`,
+// `/debug/events`) do not call DecodeJSON and are unaffected.
+//
+// Fix for M8 S-P1-001 (unbounded request body).
+const MaxRequestBodyBytes = 1 << 20 // 1 MiB
 
 // WriteJSON serializes body as JSON, sets Content-Type, and writes
 // status. It silently swallows the encode error because by the time
@@ -52,16 +60,30 @@ func WriteError(w http.ResponseWriter, err error) {
 }
 
 // DecodeJSON reads r.Body as JSON into target. Unknown fields trigger
-// an InvalidArgument error so typos are caught early.
+// an InvalidArgument error so typos are caught early. The body is
+// capped at MaxRequestBodyBytes — bodies larger than that surface as
+// errcode.PayloadTooLarge (HTTP 413).
+//
+// M8-Q-P1-016: the rendered error message includes the underlying
+// cause (e.g. `json: unknown field "foo"`) so a CLI user can tell
+// what they typo'd. The Code stays at InvalidArgument so callers
+// branching on Code still see the right shape.
 func DecodeJSON(r *http.Request, target any) error {
+	r.Body = http.MaxBytesReader(nil, r.Body, MaxRequestBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(target); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return errcode.New(errcode.PayloadTooLarge,
+				"request body exceeds %d bytes", MaxRequestBodyBytes)
+		}
 		// Distinguish "empty body" (EOF) from "malformed JSON".
-		if errors.Is(err, errors.New("EOF")) || err.Error() == "EOF" {
+		if errors.Is(err, io.EOF) {
 			return errcode.New(errcode.InvalidArgument, "empty request body")
 		}
-		return errcode.Wrap(err, errcode.InvalidArgument, "decode request body")
+		return errcode.Wrap(err, errcode.InvalidArgument,
+			"decode request body: %s", err.Error())
 	}
 	return nil
 }
@@ -251,22 +273,3 @@ func ParseSinceParam(s string) (*time.Time, error) {
 	return &t, nil
 }
 
-// AuditOrFail records an audit entry and writes a 500 response on
-// failure. **Deprecated** as of the M2-P3-012 fix: every mutating
-// handler now uses store.Bundler.WithTx + Recorder.RecordVia so the
-// mutation and the audit insert share a transaction and roll back
-// together. AuditOrFail is retained only for non-mutating bookkeeping
-// (none today) and remains here so older call sites can be located
-// during review.
-func AuditOrFail(w http.ResponseWriter, r *http.Request, rec *audit.Recorder, action audit.Action, target string, payload any) bool {
-	actor, ok := auth.AccountFromContext(r.Context())
-	if !ok {
-		WriteError(w, errcode.New(errcode.Internal, "audit called without authenticated actor"))
-		return false
-	}
-	if err := rec.Record(r.Context(), actor.ID, action, target, payload); err != nil {
-		WriteError(w, errcode.Wrap(err, errcode.Internal, "record audit"))
-		return false
-	}
-	return true
-}

@@ -84,7 +84,7 @@ err = body.get("error", {})
 assert err.get("code") == "NOT_FOUND", f"expected NOT_FOUND, got {err}"
 PY
 
-echo "==> Discord 25MB per-file guard + per-file stat verified by Go test suite"
+echo "==> Discord 10MB per-file guard + per-file stat verified by Go test suite (M7 + M8-S-P2-006)"
 # The actual ATTACHMENT_TOO_LARGE / per-file branches require an
 # authorized room which in turn requires bringing a bot online.
 # That isn't available in the mock smoke. Coverage:

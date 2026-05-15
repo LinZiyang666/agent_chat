@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -249,17 +248,20 @@ func (d *Downloader) snapshotFail(id string) failState {
 // the row is most likely permanently broken. Bound attempts at 7
 // first; that's also the point where the schedule reaches the cap
 // (2^7 s = 128 s, clamped down to 120 s).
+//
+// M8-Q-P1-003: renamed local `cap` to `maxBackoff` so the builtin
+// `cap()` stays callable and `go vet -shadow` is happy.
 func backoffFor(attempts int) time.Duration {
 	if attempts <= 0 {
 		return 0
 	}
-	const cap = 120 * time.Second
+	const maxBackoff = 120 * time.Second
 	if attempts >= 7 {
-		return cap
+		return maxBackoff
 	}
 	base := time.Second * time.Duration(1<<uint(attempts))
-	if base > cap {
-		return cap
+	if base > maxBackoff {
+		return maxBackoff
 	}
 	return base
 }
@@ -282,7 +284,11 @@ func (d *Downloader) fetchOne(ctx context.Context, a *store.Attachment) error {
 	}
 
 	dir := filepath.Join(d.cacheRoot, a.MessageID, a.ID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0o700: keep attachments inside the same trust boundary as the
+	// data-root. Defense-in-depth — the data-root is already 0o700, so
+	// loosening the leaf dir would only matter if the data-root were
+	// later opened up. Fix for M8-S-P2-002.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return errcode.Wrap(err, errcode.Internal, "create attachment dir %s", dir)
 	}
 	localPath := filepath.Join(dir, safeFilename(a.Filename, a.ID))
@@ -322,6 +328,16 @@ func (d *Downloader) fetchOne(ctx context.Context, a *store.Attachment) error {
 	hasher := sha256.New()
 	w := io.MultiWriter(tmp, hasher)
 	n, copyErr := io.Copy(w, io.LimitReader(resp.Body, limit))
+	// fsync the bytes to disk before rename (M8-Q-P1-004). Without
+	// this, a power loss after rename but before fdatasync can leave
+	// a zero-byte file at localPath and a sha256 row that doesn't
+	// match — the downloader later reads back garbage and the
+	// `MarkDownloaded` row masks the corruption.
+	if copyErr == nil {
+		if serr := tmp.Sync(); serr != nil {
+			copyErr = serr
+		}
+	}
 	if cerr := tmp.Close(); cerr != nil && copyErr == nil {
 		copyErr = cerr
 	}
@@ -332,9 +348,26 @@ func (d *Downloader) fetchOne(ctx context.Context, a *store.Attachment) error {
 		return errcode.New(errcode.InvalidArgument,
 			"attachment body exceeds max size cap (%d > %d)", n, d.maxBytes)
 	}
+	// M8-S-P2-003: verify the byte count we got matches the gateway's
+	// claim. A CDN that lies about Content-Length (or a Discord-side
+	// bug producing inconsistent sizes — M7 phase2 calls this out)
+	// would otherwise leave us with a row whose `Size` doesn't match
+	// the bytes on disk. Skip the check when the gateway didn't supply
+	// a size (a.Size == 0).
+	if a.Size > 0 && n != a.Size {
+		return errcode.New(errcode.Unavailable,
+			"attachment %s: gateway promised %d bytes, fetched %d",
+			a.ID, a.Size, n)
+	}
 
 	if err := os.Rename(tmpPath, localPath); err != nil {
 		return errcode.Wrap(err, errcode.Internal, "rename %s -> %s", tmpPath, localPath)
+	}
+	// CreateTemp's 0o600 default is preserved by Rename on POSIX, but
+	// be explicit so a future code path that swaps to non-tempfile
+	// can't quietly widen perms. (M8-S-P2-002 hardening pair.)
+	if err := os.Chmod(localPath, 0o600); err != nil {
+		return errcode.Wrap(err, errcode.Internal, "chmod %s", localPath)
 	}
 	sum := hex.EncodeToString(hasher.Sum(nil))
 	if err := d.bundle.Attachments.MarkDownloaded(ctx, a.ID, localPath, sum, time.Now().UTC()); err != nil {
@@ -345,13 +378,49 @@ func (d *Downloader) fetchOne(ctx context.Context, a *store.Attachment) error {
 	return nil
 }
 
-// safeFilename sanitises a filename for use as a leaf path component.
-// Empty / "." / ".." / slashes degrade to a fallback derived from
-// the attachment id.
+// safeFilename sanitises a gateway-supplied filename for use as a
+// leaf path component. The result is always non-empty, contains only
+// `[A-Za-z0-9._-]`, has at most 80 bytes after sanitisation, and has
+// no leading dot (so the file isn't hidden by accident).
+//
+// Anything not in the whitelist is replaced with `_`. If the result
+// after stripping is empty (or pathologically short), we fall back to
+// `att-<attachment-id>`. Mirrors the M8-S-P2-006 / M8-Q-P1-005 fixes
+// — the prior version called `filepath.Base` which on POSIX would
+// happily emit `..\\evil` (backslashes are filename bytes on Linux)
+// or control characters from a malicious gateway.
 func safeFilename(name, fallbackID string) string {
 	if name == "" || name == "." || name == ".." {
-		return fmt.Sprintf("att-%s", fallbackID)
+		return "att-" + fallbackID
 	}
 	// Strip any directory parts the gateway might have lied about.
-	return filepath.Base(name)
+	base := filepath.Base(name)
+	var b []byte
+	for i := 0; i < len(base); i++ {
+		c := base[i]
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= 'A' && c <= 'Z',
+			c >= '0' && c <= '9',
+			c == '.', c == '_', c == '-':
+			b = append(b, c)
+		default:
+			b = append(b, '_')
+		}
+	}
+	// Strip leading dots so we don't accidentally hide the file.
+	for len(b) > 0 && b[0] == '.' {
+		b = b[1:]
+	}
+	// Cap length so a malicious 4 KB filename can't fill a directory
+	// listing or trip POSIX NAME_MAX (255 on most ext4 / xfs).
+	const maxLen = 80
+	if len(b) > maxLen {
+		b = b[:maxLen]
+	}
+	if len(b) == 0 {
+		return "att-" + fallbackID
+	}
+	return string(b)
 }
+

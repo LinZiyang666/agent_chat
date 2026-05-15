@@ -87,7 +87,7 @@ func NewRouter(d Deps) http.Handler {
 
 				// M3: Discord-side wiring (admin-only).
 				r.Post("/accounts/{id}/discord",
-					apiv1.SetDiscord(d.Accounts, d.Bundler, d.Audit, d.MasterKey))
+					apiv1.SetDiscord(d.Bundler, d.Audit, d.MasterKey))
 				r.Post("/accounts/{id}/online",
 					apiv1.OnlineAccount(d.Accounts, d.Connector, d.Bundler, d.Audit, d.MasterKey, d.Ingester))
 				r.Post("/accounts/{id}/offline",
@@ -96,7 +96,7 @@ func NewRouter(d Deps) http.Handler {
 					apiv1.AccountStatus(d.Accounts, d.Connector))
 
 				// M3 debug surface — pre-M4 rooms subsystem.
-				r.Post("/debug/send", apiv1.DebugSend(d.Connector))
+				r.Post("/debug/send", apiv1.DebugSend(d.Connector, d.Audit))
 				r.Get("/debug/events", apiv1.DebugEvents(d.Connector))
 
 				// M4: rooms (admin-only mutations except member self-PATCH).
@@ -112,7 +112,7 @@ func NewRouter(d Deps) http.Handler {
 			})
 
 			// Member-and-admin operations (auth required, no admin gate).
-			r.Get("/rooms", apiv1.ListRooms(d.Accounts, d.Bundler))
+			r.Get("/rooms", apiv1.ListRooms(d.Bundler))
 			r.Get("/rooms/{id}", apiv1.GetRoom(d.Bundler))
 			r.Get("/rooms/{id}/members", apiv1.ListMembers(d.Bundler))
 			r.Patch("/memberships/{room_id}", apiv1.UpdateMembership(d.Bundler, d.Audit, d.StateBus))

@@ -244,11 +244,16 @@ func TestGetAnnouncementNotFoundForEmptyRoom(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, string(body))
 }
 
-// M6-S6 covered: ack with an unknown announcement id is rejected with 404.
+// Ack with an unknown announcement id collapses to PERM_DENIED so a
+// caller can't enumerate ids via response status (M8-S-P2-009 fix).
+// The test was named *Returns404 historically because that was the
+// pre-fix behaviour — we keep the test name to make the migration
+// easy to find via git blame, but the assertion now matches the
+// hardened behaviour.
 func TestAckAnnouncementUnknownIDReturns404(t *testing.T) {
 	env := newM5Env(t)
 	resp, body := env.do(http.MethodPost, "/v1/announcements/019e0000-0000-0000-0000-000000000000/read", nil, env.adminToken)
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode, string(body))
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode, string(body))
 }
 
 // M6-P3-001 regression guard: subscribed members with a literal

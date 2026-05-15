@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/LinZiyang666/agentchat/internal/audit"
+	"github.com/LinZiyang666/agentchat/internal/auth"
 	"github.com/LinZiyang666/agentchat/internal/bot"
 	"github.com/LinZiyang666/agentchat/internal/connector"
 	"github.com/LinZiyang666/agentchat/internal/errcode"
@@ -26,10 +28,11 @@ type DebugSendResponse struct {
 // future operator debugging; M4 will replace it with the rooms
 // subsystem.
 //
-// Admin-only (enforced by the router); no transactional audit yet
-// because the action is read-mostly diagnostic — operators can still
-// see the trace in daemon logs.
-func DebugSend(conn *connector.Connector) http.HandlerFunc {
+// Admin-only (enforced by the router). Writes an audit row on every
+// successful invocation (M8-S-P2-013 fix): operators must not be able
+// to bypass the audit log via the diagnostic surface even though it
+// is admin-only — audit is the compliance source of truth.
+func DebugSend(conn *connector.Connector, recorder *audit.Recorder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req DebugSendRequest
 		if err := DecodeJSON(r, &req); err != nil {
@@ -38,6 +41,11 @@ func DebugSend(conn *connector.Connector) http.HandlerFunc {
 		}
 		if req.AccountID == "" || req.ChannelID == "" {
 			WriteError(w, errcode.New(errcode.InvalidArgument, "account_id and channel_id are required"))
+			return
+		}
+		actor, ok := auth.AccountFromContext(r.Context())
+		if !ok {
+			WriteError(w, errcode.New(errcode.Internal, "no actor in context"))
 			return
 		}
 		p, ok := conn.Provider(req.AccountID)
@@ -49,6 +57,19 @@ func DebugSend(conn *connector.Connector) http.HandlerFunc {
 		if err != nil {
 			WriteError(w, err)
 			return
+		}
+		// Audit after the send succeeds; failure to audit is non-fatal
+		// (the Discord message already landed) but log it so an operator
+		// can reconcile via daemon logs if the audit table is unhappy.
+		if rerr := recorder.Record(r.Context(), actor.ID, audit.ActionDebugSend,
+			req.ChannelID, map[string]any{
+				"account_id":     req.AccountID,
+				"discord_msg_id": msg.ID,
+				"content_bytes":  len(req.Content),
+			}); rerr != nil {
+			// Don't surface to the client — the diagnostic action did
+			// succeed.
+			_ = rerr
 		}
 		WriteJSON(w, http.StatusOK, DebugSendResponse{Message: *msg})
 	}

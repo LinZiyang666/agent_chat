@@ -28,6 +28,14 @@ func LoadOrCreateMasterKey(path string) ([]byte, error) {
 				"master key at %s has wrong length: got %d want %d",
 				path, len(data), MasterKeyLen)
 		}
+		// Re-tighten mode every boot so a backup restore or operator
+		// `chmod` cannot leave the AES master key world-readable while
+		// it is still in use. Mirrors the data-root re-tightening
+		// pattern in config.EnsureDataRoot. Fix for M8 S-P1-002.
+		if cerr := os.Chmod(path, 0o600); cerr != nil {
+			return nil, errcode.Wrap(cerr, errcode.Internal,
+				"chmod master key %s to 0o600", path)
+		}
 		return data, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {

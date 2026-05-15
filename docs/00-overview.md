@@ -9,7 +9,12 @@
 > ## 里程碑进度
 > - **M1 仓库骨架**：✅ 完成 (2026-05-13)。Phase 3 PASS，2 Minor/Nit 已 triage。详见 [`milestones/M1-phase1.md`](./milestones/M1-phase1.md) / [`-phase2.md`](./milestones/M1-phase2.md) / [`-phase3.md`](./milestones/M1-phase3.md)。
 > - **M2 daemon + 账号 + 鉴权**：✅ 完成 (2026-05-13)。Phase 3 初审 FAIL（1 Blocker + 8 Major），全部修复后 PASS。详见 [`milestones/M2-phase1.md`](./milestones/M2-phase1.md) / [`-phase2.md`](./milestones/M2-phase2.md) / [`-phase3.md`](./milestones/M2-phase3.md)。
-> - **M3 Bot 抽象层 + Discord 接通**：⏸ Phase 1+2 完成 (2026-05-13)。流程调整：**先做 Phase 3 静态/mock 审计 → 再做真实 Discord 验证 → 最后 commit**。详见 [`milestones/M3-phase1.md`](./milestones/M3-phase1.md) / [`-phase2.md`](./milestones/M3-phase2.md)。
+> - **M3 Bot 抽象层 + Discord 接通**：✅ 完成 (2026-05-14)。详见 [`milestones/M3-phase1.md`](./milestones/M3-phase1.md) / [`-phase2.md`](./milestones/M3-phase2.md) / [`-phase3.md`](./milestones/M3-phase3.md)。
+> - **M4 房间 + 消息**：✅ 完成 (2026-05-14)。
+> - **M5 状态聚合 + watch state**：✅ 完成 (2026-05-14)。
+> - **M6 公告 + @all + system announcement**：✅ 完成 (2026-05-14)，Phase 3 一轮（`M6-P3-001`/`002`）。
+> - **M7 附件 (outbound 10 MB cap + inbound downloader)**：✅ 完成 (2026-05-14)，Phase 3 两轮（`M7-P3-001`–`004`）。
+> - **M8 全项目抛光**：🔧 进行中 (2026-05-15)。6-agent 审计完成，3 个 P0 (connector pump 跨代删除 / mock send-after-close / send.go 错误码) + 安全/代码/构建 P1 已修；详见 [`milestones/M8-findings.md`](./milestones/M8-findings.md)。
 
 ## 1. 目标
 

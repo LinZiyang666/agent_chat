@@ -50,6 +50,17 @@ const (
 	// `internal/api/v1/messages.go::DiscordAttachmentLimit`). The
 	// CLI maps this to exit code 22 so scripts can branch on it.
 	AttachmentTooLarge Code = "ATTACHMENT_TOO_LARGE"
+
+	// PayloadTooLarge (M8 S-P1-001) means the HTTP request body
+	// exceeded the per-handler cap enforced by helpers.DecodeJSON.
+	// Distinct from AttachmentTooLarge: the latter is about the
+	// Discord upload size, this is about the JSON body size.
+	PayloadTooLarge Code = "PAYLOAD_TOO_LARGE"
+
+	// ResourceExhausted (M8 S-P2-008) means a per-account quota was
+	// hit. Today this is only the per-account state-watch subscriber
+	// cap; future rate-limit work can reuse the same code.
+	ResourceExhausted Code = "RESOURCE_EXHAUSTED"
 )
 
 // Error is the canonical error type produced by this codebase. It is JSON
@@ -120,23 +131,26 @@ func Wrap(cause error, code Code, format string, args ...any) *Error {
 
 // WithDetails returns a copy of e with the given key/value attached to
 // its Details map. The receiver is not mutated.
+//
+// M8-Q-P1-007: the original implementation built a `merged` map of
+// existing entries when cp.Details was non-nil but never assigned it
+// back to cp.Details — so the final loop mutated the receiver's
+// shared Details map, breaking the contract documented above. We
+// always allocate a fresh map and copy in, regardless of the
+// receiver's state.
 func (e *Error) WithDetails(kvs map[string]any) *Error {
 	if e == nil {
 		return nil
 	}
 	cp := *e
-	if cp.Details == nil {
-		cp.Details = make(map[string]any, len(kvs))
-	} else {
-		merged := make(map[string]any, len(cp.Details)+len(kvs))
-		for k, v := range cp.Details {
-			merged[k] = v
-		}
-		cp.Details = merged
+	merged := make(map[string]any, len(cp.Details)+len(kvs))
+	for k, v := range cp.Details {
+		merged[k] = v
 	}
 	for k, v := range kvs {
-		cp.Details[k] = v
+		merged[k] = v
 	}
+	cp.Details = merged
 	return &cp
 }
 

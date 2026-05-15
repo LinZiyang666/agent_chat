@@ -139,11 +139,14 @@ func buildDSN(path string) string {
 	if path == ":memory:" {
 		return "file::memory:?cache=shared&_pragma=foreign_keys(1)"
 	}
+	// M8-Q-P1-014: removed `_time_format=sqlite` — that pragma is a
+	// `mattn/go-sqlite3` DSN option, not a `modernc.org/sqlite` one,
+	// so it was silently ignored. We store timestamps as Unix seconds
+	// via nullableUnix anyway, so the absent option is correct.
 	return "file:" + path + "?" + strings.Join([]string{
 		"_pragma=journal_mode(WAL)",
 		"_pragma=foreign_keys(1)",
 		"_pragma=synchronous(NORMAL)",
-		"_time_format=sqlite",
 		"_txlock=immediate",
 	}, "&")
 }

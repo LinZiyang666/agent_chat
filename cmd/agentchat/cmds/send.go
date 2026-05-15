@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/LinZiyang666/agentchat/internal/errcode"
 	"github.com/LinZiyang666/agentchat/pkg/client"
 )
 
@@ -49,10 +50,11 @@ read from stdin via "--file -".`,
 			// renders the upload as the visible body.
 			content = ""
 		default:
-			return fmt.Errorf("provide message text as the second argument, --file, or at least one --attach")
+			return errcode.New(errcode.InvalidArgument,
+				"provide message text as the second argument, --file, or at least one --attach")
 		}
 		if content == "" && len(flagSendAttach) == 0 {
-			return fmt.Errorf("content is empty")
+			return errcode.New(errcode.InvalidArgument, "content is empty")
 		}
 
 		atts := make([]client.SendAttachment, 0, len(flagSendAttach))

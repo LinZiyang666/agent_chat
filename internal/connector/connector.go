@@ -57,9 +57,16 @@ const (
 // instance is the per-account state Connector stores in `instances`.
 // `p` is nil while state == stateConnecting (the Factory has not
 // returned yet, or the Provider has not been Connect()'d).
+//
+// `pumpDone` is closed by pump when it exits (after walking
+// c.subs[accountID] and deleting the slice). Disconnect's success
+// path waits on it before removing the instance slot, so a fresh
+// Connect for the same accountID cannot have its new subscribers
+// wiped by the previous generation's pump tail. Fix for M8-Q-P0-002.
 type instance struct {
-	p     bot.Provider
-	state instanceState
+	p        bot.Provider
+	state    instanceState
+	pumpDone chan struct{}
 }
 
 // Connector tracks live Providers by account id and broadcasts each
@@ -99,12 +106,21 @@ func (c *Connector) Connect(ctx context.Context, accountID, token string, hint b
 	}
 	// Reserve the slot. Any concurrent Connect/Disconnect for this
 	// accountID will see the entry and bail out with Conflict.
-	c.instances[accountID] = &instance{state: stateConnecting}
+	c.instances[accountID] = &instance{
+		state:    stateConnecting,
+		pumpDone: make(chan struct{}),
+	}
 	c.mu.Unlock()
 
 	p := c.factory(token, hint)
 	if err := p.Connect(ctx); err != nil {
 		c.mu.Lock()
+		// No pump was started for this slot, so signal pumpDone
+		// immediately so any future waiter (e.g. a racing Shutdown
+		// that sees the slot before this delete) doesn't block.
+		if inst := c.instances[accountID]; inst != nil {
+			close(inst.pumpDone)
+		}
 		delete(c.instances, accountID)
 		c.mu.Unlock()
 		return err
@@ -123,9 +139,10 @@ func (c *Connector) Connect(ctx context.Context, accountID, token string, hint b
 	}
 	inst.p = p
 	inst.state = stateOnline
+	pumpDone := inst.pumpDone
 	c.mu.Unlock()
 
-	go c.pump(accountID, p)
+	go c.pump(accountID, p, pumpDone)
 	return nil
 }
 
@@ -162,23 +179,29 @@ func (c *Connector) Disconnect(ctx context.Context, accountID string) error {
 
 	err := p.Disconnect(ctx)
 
-	c.mu.Lock()
 	if err != nil {
 		// Rollback: keep the entry so the operator can retry. The
 		// underlying connection may or may not be live; the next
 		// Disconnect call will resolve it (a Provider whose internal
 		// state is already closed will return nil quickly).
+		c.mu.Lock()
 		inst.state = stateOnline
-	} else {
-		delete(c.instances, accountID)
-	}
-	c.mu.Unlock()
-
-	if err != nil {
+		c.mu.Unlock()
 		c.log.Warn("provider disconnect returned error; entry kept for retry",
 			"account_id", accountID, "err", err)
 		return err
 	}
+
+	// Success path: wait for the pump goroutine to finish walking
+	// c.subs[accountID] and closing its generation's subscribers
+	// BEFORE we release the instance slot. Otherwise a concurrent
+	// Connect for the same accountID can register fresh subscribers
+	// that the previous pump's tail then wipes (M8-Q-P0-002).
+	<-inst.pumpDone
+
+	c.mu.Lock()
+	delete(c.instances, accountID)
+	c.mu.Unlock()
 	return nil
 }
 
@@ -295,7 +318,13 @@ func (c *Connector) Unsubscribe(s *Subscription) {
 //
 // When the Provider's events channel closes, every remaining
 // subscriber is closed too — under the same mutex.
-func (c *Connector) pump(accountID string, p bot.Provider) {
+//
+// `pumpDone` is closed at the end so Disconnect can sequence
+// "pump's cleanup ran" before releasing the instance slot, preventing
+// a new generation's subscribers from being wiped by this tail
+// (M8-Q-P0-002).
+func (c *Connector) pump(accountID string, p bot.Provider, pumpDone chan struct{}) {
+	defer close(pumpDone)
 	for ev := range p.Events() {
 		c.mu.Lock()
 		for _, s := range c.subs[accountID] {

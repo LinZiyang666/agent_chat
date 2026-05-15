@@ -13,8 +13,8 @@ package errcode
 //	13   PERM_DENIED
 //	20   NOT_FOUND
 //	21   CONFLICT
-//	22   INVALID_ARGUMENT  (also ATTACHMENT_TOO_LARGE — same family;
-//	     callers wanting to distinguish should branch on the JSON `code` field)
+//	22   INVALID_ARGUMENT  (also ATTACHMENT_TOO_LARGE, PAYLOAD_TOO_LARGE — same
+//	     family; callers wanting to distinguish should branch on the JSON `code` field)
 //	50   INTERNAL
 //	51   UNAVAILABLE
 func ExitCode(err error) int {
@@ -38,8 +38,11 @@ func ExitCode(err error) int {
 		return 20
 	case Conflict:
 		return 21
-	case InvalidArgument, AttachmentTooLarge:
+	case InvalidArgument, AttachmentTooLarge, PayloadTooLarge:
 		return 22
+	case ResourceExhausted:
+		// Same family as Conflict (current state rejects the request).
+		return 21
 	case Internal:
 		return 50
 	case Unavailable:

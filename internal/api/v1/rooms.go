@@ -9,7 +9,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
-	"github.com/LinZiyang666/agentchat/internal/account"
 	"github.com/LinZiyang666/agentchat/internal/audit"
 	"github.com/LinZiyang666/agentchat/internal/auth"
 	"github.com/LinZiyang666/agentchat/internal/bot"
@@ -135,7 +134,11 @@ func CreateRoom(conn *connector.Connector, bundler store.Bundler, recorder *audi
 //
 // Admin sees every room; user sees only the rooms they are a member
 // of. Archived rooms are included only when ?include_archived=true.
-func ListRooms(svc *account.Service, bundler store.Bundler) http.HandlerFunc {
+//
+// M8-Q-P1-010: dropped the unused `svc *account.Service` parameter
+// — role lookup happens directly through the transaction's
+// b.Accounts repo.
+func ListRooms(bundler store.Bundler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		actor, ok := auth.AccountFromContext(r.Context())
 		if !ok {

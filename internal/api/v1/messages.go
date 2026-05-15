@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -135,6 +136,17 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 				return err
 			}
 			if a.Role != store.RoleAdmin {
+				// M8-S-P2-012: priority=system is operator/announcement
+				// territory. Non-admin callers cannot impersonate
+				// system traffic. Fail before the membership probe so
+				// the response code reflects the actual policy
+				// violation rather than masking it behind "not a
+				// member" — and so the membership read is skipped on
+				// disallowed inputs.
+				if priority == store.PrioritySystem {
+					return errcode.New(errcode.PermDenied,
+						"priority=system requires admin role")
+				}
 				if _, err := b.Memberships.Get(r.Context(), actor.ID, roomID); err != nil {
 					if ec, _ := errcode.As(err); ec != nil && ec.Code == errcode.NotFound {
 						return errcode.New(errcode.PermDenied,
@@ -175,10 +187,25 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 					"attachment.path is required"))
 				return
 			}
-			fi, statErr := os.Stat(a.Path)
+			// Lstat first (M8-S-P2-004): a symlink is a TOCTOU oracle —
+			// between this stat and the bot.Provider open, an attacker
+			// with write access to the parent directory can swap the
+			// target for /etc/shadow / the daemon's own master.key. We
+			// reject symlinks outright rather than canonicalising.
+			fi, statErr := os.Lstat(a.Path)
 			if statErr != nil {
 				WriteError(w, errcode.Wrap(statErr, errcode.InvalidArgument,
 					"stat attachment %s", a.Path))
+				return
+			}
+			if fi.Mode()&os.ModeSymlink != 0 {
+				WriteError(w, errcode.New(errcode.InvalidArgument,
+					"attachment %s is a symlink; refuse to follow", a.Path))
+				return
+			}
+			if !fi.Mode().IsRegular() {
+				WriteError(w, errcode.New(errcode.InvalidArgument,
+					"attachment %s is not a regular file", a.Path))
 				return
 			}
 			if fi.IsDir() {
@@ -409,16 +436,21 @@ func hydrateAttachments(ctx context.Context, bundler store.Bundler, messageID st
 
 // publishRoomMembers fetches the room's current members and calls
 // bus.PublishMany on their account ids. Runs in a goroutine off the
-// request path so the HTTP response isn't delayed. Errors are
-// swallowed (Bus.Publish is best-effort and the next Publish will
-// re-converge).
+// request path so the HTTP response isn't delayed.
+//
+// M8-Q-P1-015: tx errors are now logged (via slog.Default — the
+// daemon's logger is the runtime default in production, and tests
+// stay silent because they pipe slog through io.Discard). Without
+// this, a concurrent room delete or DB outage between the handler
+// commit and this goroutine produced "no fanout" with zero
+// visibility.
 func publishRoomMembers(bus *state.Bus, bundler store.Bundler, roomID string) {
 	if bus == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = bundler.WithTx(ctx, func(b store.Bundle) error {
+	if err := bundler.WithTx(ctx, func(b store.Bundle) error {
 		ms, err := b.Memberships.ListByRoom(ctx, roomID)
 		if err != nil {
 			return err
@@ -429,7 +461,10 @@ func publishRoomMembers(bus *state.Bus, bundler store.Bundler, roomID string) {
 		}
 		bus.PublishMany(ids)
 		return nil
-	})
+	}); err != nil {
+		slog.Warn("publishRoomMembers failed",
+			"room_id", roomID, "err", err.Error())
+	}
 }
 
 // ListMessages handles GET /v1/rooms/{id}/messages?before=&limit=.
@@ -549,6 +584,15 @@ func mutateMessageState(bundler store.Bundler, recorder *audit.Recorder, bus *st
 		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {
 			msg, err := b.Messages.Get(r.Context(), messageID)
 			if err != nil {
+				// M8-S-P2-009: collapse NotFound into PermDenied so a
+				// caller cannot enumerate message ids by status-code
+				// timing. UUIDv7 ids are time-sortable, which would
+				// otherwise let an attacker who learned one valid id
+				// fingerprint neighbouring ids' activity.
+				if ec, _ := errcode.As(err); ec != nil && ec.Code == errcode.NotFound {
+					return errcode.New(errcode.PermDenied,
+						"actor %s cannot access message %s", actor.ID, messageID)
+				}
 				return err
 			}
 			if _, err := b.Memberships.Get(r.Context(), actor.ID, msg.RoomID); err != nil {

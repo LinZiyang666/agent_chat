@@ -58,13 +58,14 @@ func (p *Provider) Connect(_ context.Context) error {
 		return p.ConnectErr
 	}
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.closed {
-		p.mu.Unlock()
 		return errcode.New(errcode.Conflict, "provider already disconnected")
 	}
 	p.status = bot.StatusOnline
-	p.mu.Unlock()
-	p.publish(bot.EventConnected{Identity: p.identity})
+	// Hold mu across the publish so a concurrent Disconnect cannot
+	// close(p.events) in between — see Disconnect's note (M8-Q-P0-003).
+	p.unsafePublish(bot.EventConnected{Identity: p.identity})
 	return nil
 }
 
@@ -73,14 +74,19 @@ func (p *Provider) Disconnect(_ context.Context) error {
 		return p.DisconnectErr
 	}
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.closed {
-		p.mu.Unlock()
 		return nil
 	}
 	p.status = bot.StatusOffline
+	// Publish the final event BEFORE flipping closed, then close the
+	// channel under the same lock as publish (M8-Q-P0-003 fix):
+	// without this, a concurrent publish that read closed=false could
+	// race past Disconnect's close(p.events) and panic with
+	// "send on closed channel". Mirrors discord.Provider's
+	// `unsafePublish` invariant (M3-P3-004).
+	p.unsafePublish(bot.EventDisconnected{Reason: "disconnect called"})
 	p.closed = true
-	p.mu.Unlock()
-	p.publish(bot.EventDisconnected{Reason: "disconnect called"})
 	close(p.events)
 	return nil
 }
@@ -181,15 +187,23 @@ func (p *Provider) InjectEvent(e bot.Event) {
 	p.publish(e)
 }
 
+// publish takes p.mu and routes to unsafePublish. External callers
+// (InjectMessage / InjectEvent) use this so the send is serialized
+// with Disconnect's close(p.events).
 func (p *Provider) publish(e bot.Event) {
 	p.mu.Lock()
-	closed := p.closed
-	p.mu.Unlock()
-	if closed {
+	defer p.mu.Unlock()
+	p.unsafePublish(e)
+}
+
+// unsafePublish requires p.mu to be held. Non-blocking — drops on
+// full buffer rather than deadlocking tests. The caller is responsible
+// for ensuring p.closed has not been flipped to true since they
+// acquired the lock.
+func (p *Provider) unsafePublish(e bot.Event) {
+	if p.closed {
 		return
 	}
-	// Non-blocking publish: drop on full buffer rather than deadlocking
-	// the test. Tests with a tight events channel can drain via Events.
 	select {
 	case p.events <- e:
 	default:

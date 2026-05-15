@@ -19,13 +19,14 @@ import (
 //	-X github.com/LinZiyang666/agentchat/cmd/agentchat/cmds.Version=<ver>
 var Version = "dev"
 
-// flagToken / flagSocket / flagJSON / flagNoColor are bound to
-// persistent flags on rootCmd, accessible to every subcommand.
+// flagToken / flagSocket / flagJSON are bound to persistent flags on
+// rootCmd, accessible to every subcommand. (M8-C-P1-001 dropped the
+// inert --no-color flag — it was registered but never consulted by
+// any renderer; reintroduce only when colorized output exists.)
 var (
-	flagToken   string
-	flagSocket  string
-	flagJSON    bool
-	flagNoColor bool
+	flagToken  string
+	flagSocket string
+	flagJSON   bool
 )
 
 const (
@@ -61,8 +62,6 @@ func init() {
 		"daemon Unix socket path (default <data-root>/agentchatd.sock)")
 	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false,
 		"force JSON output even on a terminal")
-	rootCmd.PersistentFlags().BoolVar(&flagNoColor, "no-color", false,
-		"reserved for future colorized human output (no-op today)")
 }
 
 // Execute runs the root command.

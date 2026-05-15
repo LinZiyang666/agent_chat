@@ -38,7 +38,11 @@ type StatusResponse struct {
 //
 // Transactional: the encrypted-token update and the audit row commit
 // together via bundler.WithTx.
-func SetDiscord(svc *account.Service, bundler store.Bundler, recorder *audit.Recorder, masterKey []byte) http.HandlerFunc {
+//
+// M8-Q-P1-010: dropped the unused `svc *account.Service` parameter.
+// The handler resolves the target account directly through the
+// transaction's b.Accounts repo, so the service handle was dead.
+func SetDiscord(bundler store.Bundler, recorder *audit.Recorder, masterKey []byte) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		var req SetDiscordRequest

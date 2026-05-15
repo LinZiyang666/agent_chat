@@ -227,6 +227,13 @@ func MarkAnnouncementRead(bundler store.Bundler, recorder *audit.Recorder, bus *
 		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {
 			ann, err := b.Announcements.Get(r.Context(), annID)
 			if err != nil {
+				// M8-S-P2-009: collapse NotFound into PermDenied so
+				// the read-state mutation can't be used to enumerate
+				// announcement ids.
+				if ec, _ := errcode.As(err); ec != nil && ec.Code == errcode.NotFound {
+					return errcode.New(errcode.PermDenied,
+						"actor %s cannot access announcement %s", actor.ID, annID)
+				}
 				return err
 			}
 			a, err := b.Accounts.Get(r.Context(), actor.ID)
