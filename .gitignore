@@ -23,8 +23,41 @@ attachments/
 .idea/
 .vscode/
 *.swp
+*.swo
 *~
 
 # OS
 .DS_Store
 Thumbs.db
+
+# AI agent / coding-assistant per-repo state. These directories
+# hold session state, scheduled-task locks, settings overrides, and
+# other ephemera from agentic tools (Claude Code, Codex, Cursor,
+# Aider …). They are user-specific and must not be committed.
+.claude/
+.codex/
+.agents/
+.cursor/
+.aider*
+CLAUDE.local.md
+
+# Go build leftovers not already covered by /bin
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+go.work
+go.work.sum
+
+# Profile / debug artifacts
+*.prof
+*.pprof
+cpu.out
+mem.out
+trace.out
+
+# Local environment overrides — committed templates use .env.example
+.env
+.env.*
+!.env.example
