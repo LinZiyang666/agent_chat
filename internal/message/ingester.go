@@ -179,6 +179,12 @@ func (i *Ingester) ingestNew(ingesterAccountID string, e bot.EventMessageNew) er
 			Priority:        store.PriorityNormal,
 			CreatedAt:       e.Message.CreatedAt.UTC(),
 			ContentHash:     hex.EncodeToString(hash[:]),
+			// M9: inbound message carries Discord-native mention flags.
+			// MentionEveryone goes on the messages row; per-account
+			// mentions are written below into message_mentions after
+			// we know the persisted id and the bot_user_id -> account_id
+			// mapping is resolved.
+			MentionEveryone: e.Message.MentionEveryone,
 		}
 		// If the send-path already wrote the row (because we sent the
 		// message ourselves via POST /v1/rooms/{id}/messages and the
@@ -189,9 +195,81 @@ func (i *Ingester) ingestNew(ingesterAccountID string, e bot.EventMessageNew) er
 		if err != nil {
 			return err
 		}
+
+		// Resolve the room's current member set once. Used for:
+		//   1. fan-out of message_states (inserted path).
+		//   2. M9 Phase 1: filtering mention targets to current
+		//      members only — Discord's `mentions` array can include
+		//      users who aren't in the agentchat room (e.g. someone
+		//      we no longer share the channel with), and recording
+		//      message_mentions for non-members would pollute the
+		//      mention feed of accounts the aggregator otherwise
+		//      shields with its memberships join.
+		members, err := b.Memberships.ListByRoom(ctx, room.ID)
+		if err != nil {
+			return err
+		}
+		memberSet := make(map[string]struct{}, len(members))
+		for _, m := range members {
+			memberSet[m.AccountID] = struct{}{}
+		}
+
+		// M9 Phase 1: persist mention metadata on BOTH the inserted
+		// and the conflict path. Why both:
+		//
+		// - The conflict path runs when the send handler raced ahead
+		//   and wrote the messages row first. The gateway echo
+		//   carries the authoritative Discord-side mention list,
+		//   which the send-path's req.MentionAll mirror can't see.
+		//   Skipping the echo (the M9 Phase 1 review's P2-1 finding)
+		//   would drop that data.
+		//
+		// - The inserted path is the common case where the message
+		//   originated externally; the same code populates
+		//   message_mentions / mention_everyone from the inbound
+		//   event.
+		//
+		// Both writes are idempotent: MergeMentionEveryone is
+		// OR-merge (true sticks, false is no-op), AddForMessage is
+		// INSERT OR IGNORE keyed on (message_id, account_id). So
+		// reordering the two paths cannot lose data.
+		mentionMetadataChanged := false
+		if e.Message.MentionEveryone {
+			if err := b.Messages.MergeMentionEveryone(ctx, persistedID, true); err != nil {
+				return err
+			}
+			mentionMetadataChanged = true
+		}
+		var mentionedAccountIDs []string
+		if len(e.Message.MentionedBotUserIDs) > 0 {
+			mentionedAccountIDs, err = i.resolveMentions(
+				ctx, b, e.Message.MentionedBotUserIDs, memberSet)
+			if err != nil {
+				return err
+			}
+			if len(mentionedAccountIDs) > 0 {
+				if err := b.MessageMentions.AddForMessage(
+					ctx, persistedID, mentionedAccountIDs); err != nil {
+					return err
+				}
+				mentionMetadataChanged = true
+			}
+		}
+
 		if !inserted {
-			// Outbound echo of a message we already persisted via the
-			// send handler: states were created at send time. Skip.
+			// Outbound echo of a message the send handler already
+			// persisted. message_states + attachments were written
+			// there too; only mention metadata above was new. Notify
+			// all current members so the aggregator picks the
+			// updated mention rows up — otherwise totals.mentions
+			// would lag until the next unrelated event.
+			if mentionMetadataChanged {
+				ids := make([]string, 0, len(members))
+				for _, m := range members {
+					ids = append(ids, m.AccountID)
+				}
+				notify = ids
+			}
 			return nil
 		}
 
@@ -203,10 +281,6 @@ func (i *Ingester) ingestNew(ingesterAccountID string, e bot.EventMessageNew) er
 		//
 		// read_at = NULL for everyone except the author (if the
 		// author is one of our accounts, send counts as read).
-		members, err := b.Memberships.ListByRoom(ctx, room.ID)
-		if err != nil {
-			return err
-		}
 		nowPtr := func() *time.Time { t := time.Now().UTC(); return &t }
 		ids := make([]string, 0, len(members))
 		for _, m := range members {
@@ -279,4 +353,54 @@ func (i *Ingester) resolveAuthor(ctx context.Context, b store.Bundle, discordUse
 		}
 	}
 	return "", nil
+}
+
+// resolveMentions maps each Discord user snowflake in botUserIDs to an
+// agentchat account_id. A bot_user_id is kept only if:
+//   - it matches an agentchat account (external Discord humans drop
+//     out — they don't have a state inbox here), AND
+//   - that account is a current member of the room (membership filter
+//     enforced via memberSet; non-members must not end up in
+//     message_mentions because the aggregator's joins would otherwise
+//     fail to shield them from a targeted ping that crossed rooms).
+//
+// Order in the returned slice is unspecified; duplicates are
+// deduplicated. Returns an empty slice (not nil) when no mention maps
+// to a known room member.
+//
+// One List+linear-scan per inbound message is acceptable because the
+// number of agentchat accounts is small (Discord caps individual
+// developers at ~10 applications, see architecture D3.1) and the per-
+// message mention list is also bounded.
+func (i *Ingester) resolveMentions(ctx context.Context, b store.Bundle, botUserIDs []string, memberSet map[string]struct{}) ([]string, error) {
+	if len(botUserIDs) == 0 {
+		return nil, nil
+	}
+	accounts, err := b.Accounts.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	byBotID := make(map[string]string, len(accounts))
+	for _, a := range accounts {
+		if a.BotUserID != "" {
+			byBotID[a.BotUserID] = a.ID
+		}
+	}
+	seen := make(map[string]struct{}, len(botUserIDs))
+	out := make([]string, 0, len(botUserIDs))
+	for _, bid := range botUserIDs {
+		aid, ok := byBotID[bid]
+		if !ok {
+			continue
+		}
+		if _, isMember := memberSet[aid]; !isMember {
+			continue
+		}
+		if _, dup := seen[aid]; dup {
+			continue
+		}
+		seen[aid] = struct{}{}
+		out = append(out, aid)
+	}
+	return out, nil
 }

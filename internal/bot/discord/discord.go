@@ -453,11 +453,25 @@ func discordToMessage(m *discordgo.Message) *bot.Message {
 		author = m.Author.ID
 	}
 	out := &bot.Message{
-		ID:        m.ID,
-		ChannelID: m.ChannelID,
-		AuthorID:  author,
-		Content:   m.Content,
-		CreatedAt: m.Timestamp,
+		ID:              m.ID,
+		ChannelID:       m.ChannelID,
+		AuthorID:        author,
+		Content:         m.Content,
+		CreatedAt:       m.Timestamp,
+		MentionEveryone: m.MentionEveryone,
+	}
+	// M9: capture per-user mentions. Each entry is a Discord user
+	// snowflake; the daemon ingester maps these to accountchat
+	// account IDs through accounts.bot_user_id. We don't attempt
+	// any mapping here — provider stays platform-shaped.
+	if len(m.Mentions) > 0 {
+		out.MentionedBotUserIDs = make([]string, 0, len(m.Mentions))
+		for _, u := range m.Mentions {
+			if u == nil || u.ID == "" {
+				continue
+			}
+			out.MentionedBotUserIDs = append(out.MentionedBotUserIDs, u.ID)
+		}
 	}
 	if len(m.Attachments) > 0 {
 		out.Attachments = make([]bot.MsgAttachURL, 0, len(m.Attachments))

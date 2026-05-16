@@ -267,6 +267,12 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 			CreatedAt:       sent.CreatedAt.UTC(),
 			ContentHash:     hex.EncodeToString(hash[:]),
 			MentionAll:      req.MentionAll,
+			// M9 Phase 1: mirror --all to MentionEveryone so the new
+			// state.CountMentionsForSubscribed (which reads
+			// mention_everyone) sees legacy send-path @all without
+			// requiring the API surface to change yet. Phase 2 drops
+			// MentionAll entirely.
+			MentionEveryone: req.MentionAll,
 		}
 		if replyParent != nil {
 			msg.ReplyToMsgID = replyParent.ID
@@ -305,6 +311,7 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 					Priority:        msg.Priority,
 					ContentHash:     msg.ContentHash,
 					MentionAll:      msg.MentionAll,
+					MentionEveryone: msg.MentionEveryone,
 				}); err != nil {
 					return err
 				}

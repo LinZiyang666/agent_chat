@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	apiv1 "github.com/LinZiyang666/agentchat/internal/api/v1"
+	"github.com/LinZiyang666/agentchat/internal/bot"
 )
 
 // m6Env reuses m5Env (state bus + ingester wiring) — announcements and
@@ -256,45 +258,19 @@ func TestAckAnnouncementUnknownIDReturns404(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode, string(body))
 }
 
-// M6-P3-001 regression guard: subscribed members with a literal
-// <@bot> content match keep the M5 subscribed-only semantics; the
-// mention_all widening must not break the bot-id path.
-func TestMentionByBotIDStillSubscribedOnly(t *testing.T) {
-	env := newM5Env(t)
-	room := env.onlineAdminAndCreateRoom(t, "p3guard")
-
-	// Subscribed viewer with a real bot identity (so <@user_id> can match).
-	resp, body := env.do(http.MethodPost, "/v1/accounts",
-		apiv1.CreateAccountRequest{Name: "sub", Role: "user"}, env.adminToken)
-	require.Equal(t, http.StatusCreated, resp.StatusCode, string(body))
-	var sub apiv1.AccountResponse
-	require.NoError(t, json.Unmarshal(body, &sub))
-	resp, _ = env.do(http.MethodPost, "/v1/accounts/"+sub.ID+"/discord",
-		apiv1.SetDiscordRequest{BotToken: "fake-sub"}, env.adminToken)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	resp, _ = env.do(http.MethodPost, "/v1/accounts/"+sub.ID+"/online", nil, env.adminToken)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	// The mock Provider's Identity assigns user_id = "u-<username>".
-	resp, _ = env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/members",
-		apiv1.InviteRequest{AccountID: sub.ID, Subscribed: true}, env.adminToken)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	resp, body = env.do(http.MethodPost, "/v1/accounts/"+sub.ID+"/tokens", nil, env.adminToken)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var subTok apiv1.CreateTokenResponse
-	require.NoError(t, json.Unmarshal(body, &subTok))
-
-	resp, body = env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/messages",
-		apiv1.SendMessageRequest{Content: "hello <@u-sub>"}, env.adminToken)
-	require.Equal(t, http.StatusCreated, resp.StatusCode, string(body))
-
-	resp, body = env.do(http.MethodGet, "/v1/state", nil, subTok.Raw)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	var snap map[string]any
-	require.NoError(t, json.Unmarshal(body, &snap))
-	assert.EqualValues(t, 1, snap["totals"].(map[string]any)["mentions"],
-		"subscribed member with literal <@bot_user_id> match must still surface")
-}
+// M9 Phase 1: the M6-era TestMentionByBotIDStillSubscribedOnly
+// regression guard was removed here. It exercised the content-LIKE
+// `<@bot_user_id>` mention path, which M9 retired in favour of the
+// `message_mentions` table written by the ingester (and, in M9
+// Phase 2, by the send handler after it learns to parse `@<name>`
+// from outbound content). The replacement coverage lives at the
+// repository layer in
+// internal/store/sqlite/sqlite_m5_test.go::TestM5MessageStateReadPathsScopeToSubscribedNonArchivedRooms
+// and at the aggregator layer in
+// internal/state/aggregator_test.go::TestSnapshotPerUserMentionRequiresSubscribed.
+//
+// The end-to-end ingester→state path through the API surface is
+// covered by TestM9IngesterFanOutsMentionsToState below.
 
 func TestAnnouncementCreateRejectedFromOutsider(t *testing.T) {
 	env := newM5Env(t)
@@ -313,4 +289,96 @@ func TestAnnouncementCreateRejectedFromOutsider(t *testing.T) {
 	resp, _ = env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/announcement",
 		apiv1.CreateAnnouncementRequest{Content: "leak"}, tok.Raw)
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+// M9 Phase 1: a Discord-sourced message that mentions the viewer's bot
+// user id must land in the viewer's snapshot under both the mentions
+// feed and the totals.mentions counter, via the new message_mentions
+// table (no content-LIKE).
+//
+// Setup: admin creates room, viewer is subscribed. Then an inbound
+// gateway event arrives carrying MentionedBotUserIDs = [viewer's bot
+// user id]. The ingester maps bot_user_id → account_id and fans the
+// mention out into message_mentions; the state aggregator picks it up.
+func TestM9IngesterFanOutsMentionsToState(t *testing.T) {
+	env := newM5Env(t)
+	room, viewer, viewerTok := roomWithViewer(t, env, "ops", "viewer")
+
+	// mock provider derives bot user id as "u-<account name>" (see
+	// the connector factory in newM5Env). Inject a fresh inbound
+	// message carrying that snowflake in MentionedBotUserIDs.
+	env.latest().InjectMessage(bot.Message{
+		ID:                  "discord-mention-1",
+		ChannelID:           room.DiscordChannelID,
+		AuthorID:            "u-someone-else",
+		Content:             "hey can you take a look",
+		CreatedAt:           time.Now(),
+		MentionedBotUserIDs: []string{"u-" + viewer.Name},
+	})
+
+	require.Eventually(t, func() bool {
+		resp, body := env.do(http.MethodGet, "/v1/state", nil, viewerTok)
+		if resp.StatusCode != http.StatusOK {
+			return false
+		}
+		var snap map[string]any
+		if err := json.Unmarshal(body, &snap); err != nil {
+			return false
+		}
+		totals, _ := snap["totals"].(map[string]any)
+		mentions, _ := totals["mentions"].(float64)
+		feed, _ := snap["mentions"].([]any)
+		return int(mentions) == 1 && len(feed) == 1
+	}, 5*time.Second, 50*time.Millisecond, "viewer should see exactly one mention after ingester runs")
+}
+
+// M9 Phase 1: an inbound message flagged @everyone (MentionEveryone)
+// must surface in EVERY member's mention feed regardless of their
+// subscription — including unsubscribed (旁观) members. This mirrors
+// the M6 mention_all semantics through the new mention_everyone column.
+func TestM9IngesterFanOutsMentionEveryoneEvenToUnsubscribed(t *testing.T) {
+	env := newM5Env(t)
+	room := env.onlineAdminAndCreateRoom(t, "broadcast")
+
+	// Create an unsubscribed viewer (旁观 mode).
+	resp, body := env.do(http.MethodPost, "/v1/accounts",
+		apiv1.CreateAccountRequest{Name: "lurker", Role: "user"}, env.adminToken)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, string(body))
+	var viewer apiv1.AccountResponse
+	require.NoError(t, json.Unmarshal(body, &viewer))
+	resp, _ = env.do(http.MethodPost, "/v1/accounts/"+viewer.ID+"/discord",
+		apiv1.SetDiscordRequest{BotToken: "fake-lurker"}, env.adminToken)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	resp, _ = env.do(http.MethodPost, "/v1/accounts/"+viewer.ID+"/online", nil, env.adminToken)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	resp, _ = env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/members",
+		apiv1.InviteRequest{AccountID: viewer.ID, Subscribed: false}, env.adminToken)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	resp, body = env.do(http.MethodPost, "/v1/accounts/"+viewer.ID+"/tokens", nil, env.adminToken)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var viewerTok apiv1.CreateTokenResponse
+	require.NoError(t, json.Unmarshal(body, &viewerTok))
+
+	env.latest().InjectMessage(bot.Message{
+		ID:              "discord-everyone-1",
+		ChannelID:       room.DiscordChannelID,
+		AuthorID:        "u-someone-else",
+		Content:         "all hands meeting now",
+		CreatedAt:       time.Now(),
+		MentionEveryone: true,
+	})
+
+	require.Eventually(t, func() bool {
+		resp, body := env.do(http.MethodGet, "/v1/state", nil, viewerTok.Raw)
+		if resp.StatusCode != http.StatusOK {
+			return false
+		}
+		var snap map[string]any
+		if err := json.Unmarshal(body, &snap); err != nil {
+			return false
+		}
+		totals, _ := snap["totals"].(map[string]any)
+		mentions, _ := totals["mentions"].(float64)
+		return int(mentions) == 1
+	}, 5*time.Second, 50*time.Millisecond, "@everyone must reach unsubscribed (旁观) members")
 }

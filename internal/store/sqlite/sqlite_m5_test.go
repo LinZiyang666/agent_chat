@@ -58,12 +58,18 @@ func TestM5MessageStateReadPathsScopeToSubscribedNonArchivedRooms(t *testing.T) 
 		require.NoError(t, s.Bundle().Memberships.Upsert(context.Background(), m))
 	}
 
+	// M9 Phase 1: mention semantics moved off content-LIKE onto
+	// message_mentions. The msg in each room gets a mention row for
+	// the viewer; expected pre/post-filter counts are identical to
+	// the M6 baseline but the source of truth is the new table.
 	makeMsg := func(roomID, discordID string) *store.Message {
-		m := mustCreateM5Message(t, s, roomID, discordID, "urgent ack <@bot-viewer>", func(m *store.Message) {
+		m := mustCreateM5Message(t, s, roomID, discordID, "urgent please ack", func(m *store.Message) {
 			m.RequiresAck = true
 			m.Priority = store.PriorityUrgent
 		})
 		mustCreateM5State(t, s, m.ID, viewer.ID, nil, nil)
+		require.NoError(t, s.Bundle().MessageMentions.SetForMessage(
+			context.Background(), m.ID, []string{viewer.ID}))
 		return m
 	}
 	activeMsg := makeMsg(active.ID, "dm-active")
@@ -100,13 +106,6 @@ func TestM5MessageStateReadPathsScopeToSubscribedNonArchivedRooms(t *testing.T) 
 	require.NoError(t, err)
 	require.Len(t, priorityRows, 1)
 	assert.Equal(t, activeMsg.ID, priorityRows[0].ID)
-
-	emptyMentions, err := repo.CountMentionsForSubscribed(context.Background(), viewer.ID, "")
-	require.NoError(t, err)
-	assert.Equal(t, 0, emptyMentions)
-	emptyMentionRows, err := repo.ListMentionsForSubscribed(context.Background(), viewer.ID, "", 50)
-	require.NoError(t, err)
-	assert.Empty(t, emptyMentionRows)
 }
 
 func TestM5MembershipJoinAndLatestMessageReadModels(t *testing.T) {

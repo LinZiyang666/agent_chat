@@ -110,6 +110,14 @@ type MessageRepo interface {
 	// external gateway events cannot overwrite send-owned metadata.
 	// Returns NotFound if id does not exist.
 	ApplySendMetadata(ctx context.Context, id string, m SendMetadata) error
+	// MergeMentionEveryone OR-merges the mention_everyone flag onto an
+	// existing message row: true sticks, false is a no-op. Used by the
+	// ingester's conflict path (M9 Phase 1) so a gateway echo with
+	// `@everyone=true` arriving after the send path's first write
+	// does not get lost, and a later send-side write of `false` cannot
+	// clobber a true the ingester already observed.
+	// Returns NotFound if id does not exist.
+	MergeMentionEveryone(ctx context.Context, id string, flag bool) error
 }
 
 // SendMetadata is the set of agentchat-local fields the send path
@@ -121,6 +129,10 @@ type SendMetadata struct {
 	Priority        MessagePriority
 	ContentHash     string
 	MentionAll      bool
+	// MentionEveryone is the M9-side mirror of MentionAll. The send
+	// handler writes both during Phase 1 so the new state queries
+	// (which read mention_everyone) see legacy --all messages.
+	MentionEveryone bool
 }
 
 // MessageStateRepo persists MessageState rows (per-account read/reply
@@ -270,11 +282,37 @@ type Bundle struct {
 	Memberships             MembershipRepo
 	Messages                MessageRepo
 	MessageStates           MessageStateRepo
+	MessageMentions         MessageMentionRepo
 	Announcements           AnnouncementRepo
 	AnnouncementReads       AnnouncementReadRepo
 	SystemAnnouncements     SystemAnnouncementRepo
 	SystemAnnouncementReads SystemAnnouncementReadRepo
 	Attachments             AttachmentRepo
+}
+
+// MessageMentionRepo persists per-message @-mention sets (M9). Absence
+// of a (message_id, account_id) row = the account is not mentioned in
+// that message. @everyone is NOT stored here — it lives on
+// messages.mention_everyone because it crosses the room rather than
+// targeting specific accounts.
+type MessageMentionRepo interface {
+	// SetForMessage replaces the mention set for messageID with the
+	// given account IDs. Idempotent. An empty accountIDs slice clears
+	// existing rows. Use when you want the table to reflect a
+	// definitive list (not common in M9 — the ingester uses
+	// AddForMessage instead so a send-path-then-gateway-echo race
+	// doesn't wipe rows the send path may have written).
+	SetForMessage(ctx context.Context, messageID string, accountIDs []string) error
+	// AddForMessage unions accountIDs into the existing mention set
+	// for messageID. Existing rows are preserved (INSERT OR IGNORE
+	// semantics). This is what both the ingester and (M9 Phase 2) the
+	// send handler use, because the two paths can race on the same
+	// Discord message and neither should clobber the other's
+	// resolved mentions.
+	AddForMessage(ctx context.Context, messageID string, accountIDs []string) error
+	// ListForMessage returns the account IDs mentioned in messageID.
+	// Order is unspecified.
+	ListForMessage(ctx context.Context, messageID string) ([]string, error)
 }
 
 // Bundler runs a closure inside a single backend-level transaction.

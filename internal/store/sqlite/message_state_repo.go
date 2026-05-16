@@ -74,19 +74,26 @@ SELECT COUNT(*)
 }
 
 func (r *messageStateRepo) CountMentionsForSubscribed(ctx context.Context, accountID, botUserID string) (int, error) {
-	// M6 (M6-P3-001 fix): the `mention_all` flag intentionally crosses
-	// the M5 subscribed-only filter — per requirements §3.5
-	// "群内当前所有成员" and roadmap §7 demo "所有成员的维度 3", a
-	// `@all` message reaches every current member of the room
-	// regardless of their subscription state. The literal `<@bot>`
-	// match keeps the M5 subscribed-only semantics (a content-targeted
-	// mention is only notification for subscribed members).
+	// M9 Phase 1: source of mentions changed from content-LIKE to two
+	// columns the daemon writes explicitly:
+	//   - messages.mention_everyone   (Discord `@everyone`, plus the
+	//                                  M9-Phase-1 mirror of legacy
+	//                                  `mention_all = 1`)
+	//   - message_mentions(message_id, account_id)
+	//                                 (per-user mention set;
+	//                                  ingester writes from
+	//                                  bot.Message.MentionedBotUserIDs)
 	//
-	// Future members (memberships inserted after the message) are
-	// naturally excluded: the SendMessage fan-out only creates a
-	// message_states row for members existing at send time, so the
-	// JOIN to message_states already gates that.
-	needle := "%<@" + botUserID + ">%"
+	// Subscription semantics preserved from M6: `@everyone` crosses
+	// the subscribed-only filter (every current member counts it);
+	// per-user mentions still require the recipient to be subscribed
+	// — sending a targeted ping to an unsubscribed (旁观) member
+	// should not promote them to the active state UI.
+	//
+	// `botUserID` is kept in the signature for source-compatibility
+	// with M6 callers and will be removed in M9 Phase 2 along with
+	// the rest of the legacy mention plumbing.
+	_ = botUserID
 	var n int
 	err := r.db.QueryRowContext(ctx, `
 SELECT COUNT(*)
@@ -98,10 +105,14 @@ SELECT COUNT(*)
    AND ms.read_at IS NULL
    AND rm.archived = 0
    AND (
-       m.mention_all = 1
-       OR (mb.subscribed = 1 AND ? <> '' AND m.content LIKE ?)
+       m.mention_everyone = 1
+       OR (mb.subscribed = 1 AND EXISTS (
+           SELECT 1 FROM message_mentions mm
+            WHERE mm.message_id = m.id
+              AND mm.account_id = ms.account_id
+       ))
    )`,
-		accountID, botUserID, needle).Scan(&n)
+		accountID).Scan(&n)
 	if err != nil {
 		return 0, errcode.Wrap(err, errcode.Internal, "count mentions for subscribed")
 	}
@@ -181,14 +192,14 @@ func (r *messageStateRepo) ListMentionsForSubscribed(ctx context.Context, accoun
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	// M6 (M6-P3-001 fix): mirror the predicate in
-	// CountMentionsForSubscribed — `mention_all = 1` crosses the
-	// subscribed filter; content `<@bot>` matches stay subscribed-only.
-	needle := "%<@" + botUserID + ">%"
+	// M9 Phase 1: mirrors CountMentionsForSubscribed — see that
+	// function for the rationale. botUserID kept in signature for
+	// source-compat; removed in Phase 2.
+	_ = botUserID
 	rows, err := r.db.QueryContext(ctx, `
 SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
        m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash,
-       m.mention_all
+       m.mention_all, m.mention_everyone
   FROM messages       m
   JOIN message_states ms ON ms.message_id = m.id
   JOIN memberships    mb ON mb.account_id = ms.account_id AND mb.room_id = m.room_id
@@ -197,11 +208,15 @@ SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
    AND ms.read_at IS NULL
    AND rm.archived = 0
    AND (
-       m.mention_all = 1
-       OR (mb.subscribed = 1 AND ? <> '' AND m.content LIKE ?)
+       m.mention_everyone = 1
+       OR (mb.subscribed = 1 AND EXISTS (
+           SELECT 1 FROM message_mentions mm
+            WHERE mm.message_id = m.id
+              AND mm.account_id = ms.account_id
+       ))
    )
  ORDER BY m.created_at DESC, m.id DESC
- LIMIT ?`, accountID, botUserID, needle, limit)
+ LIMIT ?`, accountID, limit)
 	if err != nil {
 		return nil, errcode.Wrap(err, errcode.Internal, "list mentions for subscribed")
 	}
@@ -216,7 +231,7 @@ func (r *messageStateRepo) ListPendingAcksForSubscribed(ctx context.Context, acc
 	rows, err := r.db.QueryContext(ctx, `
 SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
        m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash,
-       m.mention_all
+       m.mention_all, m.mention_everyone
   FROM messages       m
   JOIN message_states ms ON ms.message_id = m.id
   JOIN memberships    mb ON mb.account_id = ms.account_id AND mb.room_id = m.room_id
@@ -242,7 +257,7 @@ func (r *messageStateRepo) ListPriorityForSubscribed(ctx context.Context, accoun
 	rows, err := r.db.QueryContext(ctx, `
 SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
        m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash,
-       m.mention_all
+       m.mention_all, m.mention_everyone
   FROM messages       m
   JOIN message_states ms ON ms.message_id = m.id
   JOIN memberships    mb ON mb.account_id = ms.account_id AND mb.room_id = m.room_id

@@ -15,7 +15,8 @@ type messageRepo struct {
 }
 
 const messageSelectCols = `id, room_id, author_account_id, discord_msg_id, content,
-       reply_to_msg_id, requires_ack, priority, created_at, content_hash, mention_all`
+       reply_to_msg_id, requires_ack, priority, created_at, content_hash, mention_all,
+       mention_everyone`
 
 func (r *messageRepo) Create(ctx context.Context, m *store.Message) error {
 	if m == nil {
@@ -27,11 +28,11 @@ func (r *messageRepo) Create(ctx context.Context, m *store.Message) error {
 	_, err := r.db.ExecContext(ctx, `
 INSERT INTO messages(id, room_id, author_account_id, discord_msg_id, content,
                      reply_to_msg_id, requires_ack, priority, created_at, content_hash,
-                     mention_all)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                     mention_all, mention_everyone)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ID, m.RoomID, nullableString(m.AuthorAccountID), m.DiscordMsgID, m.Content,
 		nullableString(m.ReplyToMsgID), boolToInt(m.RequiresAck), string(m.Priority),
-		m.CreatedAt.Unix(), m.ContentHash, boolToInt(m.MentionAll),
+		m.CreatedAt.Unix(), m.ContentHash, boolToInt(m.MentionAll), boolToInt(m.MentionEveryone),
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -53,12 +54,12 @@ func (r *messageRepo) CreateIgnoreConflict(ctx context.Context, m *store.Message
 	res, err := r.db.ExecContext(ctx, `
 INSERT INTO messages(id, room_id, author_account_id, discord_msg_id, content,
                      reply_to_msg_id, requires_ack, priority, created_at, content_hash,
-                     mention_all)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     mention_all, mention_everyone)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(discord_msg_id) DO NOTHING`,
 		m.ID, m.RoomID, nullableString(m.AuthorAccountID), m.DiscordMsgID, m.Content,
 		nullableString(m.ReplyToMsgID), boolToInt(m.RequiresAck), string(m.Priority),
-		m.CreatedAt.Unix(), m.ContentHash, boolToInt(m.MentionAll),
+		m.CreatedAt.Unix(), m.ContentHash, boolToInt(m.MentionAll), boolToInt(m.MentionEveryone),
 	)
 	if err != nil {
 		return "", false, errcode.Wrap(err, errcode.Internal, "insert-or-ignore message")
@@ -168,7 +169,7 @@ func (r *messageRepo) LatestPerRoomForMember(ctx context.Context, accountID stri
 WITH ranked AS (
   SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
          m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash,
-         m.mention_all,
+         m.mention_all, m.mention_everyone,
          ROW_NUMBER() OVER (PARTITION BY m.room_id ORDER BY m.created_at DESC, m.id DESC) AS rn
     FROM messages m
     JOIN memberships mb ON mb.room_id = m.room_id
@@ -177,7 +178,8 @@ WITH ranked AS (
      AND rm.archived = 0
 )
 SELECT id, room_id, author_account_id, discord_msg_id, content,
-       reply_to_msg_id, requires_ack, priority, created_at, content_hash, mention_all
+       reply_to_msg_id, requires_ack, priority, created_at, content_hash, mention_all,
+       mention_everyone
   FROM ranked
  WHERE rn = 1`, accountID)
 	if err != nil {
@@ -204,6 +206,13 @@ func (r *messageRepo) ApplySendMetadata(ctx context.Context, id string, m store.
 	if !m.Priority.Valid() {
 		return errcode.New(errcode.InvalidArgument, "invalid priority %q", m.Priority)
 	}
+	// M9 Phase 1 fix: mention_everyone is OR-merged rather than
+	// overwritten. The ingester may have already set mention_everyone=1
+	// from a gateway echo by the time ApplySendMetadata runs (or
+	// vice-versa). Letting send overwrite to 0 would silently drop the
+	// real Discord-confirmed @everyone flag; CASE-MAX gives a stable
+	// "true sticks" merge. mention_all keeps its overwrite semantics
+	// because it's the legacy flag scheduled for removal in M9 Phase 2.
 	res, err := r.db.ExecContext(ctx, `
 UPDATE messages
    SET author_account_id = ?,
@@ -211,7 +220,8 @@ UPDATE messages
        requires_ack      = ?,
        priority          = ?,
        content_hash      = ?,
-       mention_all       = ?
+       mention_all       = ?,
+       mention_everyone  = MAX(mention_everyone, ?)
  WHERE id = ?`,
 		nullableString(m.AuthorAccountID),
 		nullableString(m.ReplyToMsgID),
@@ -219,10 +229,48 @@ UPDATE messages
 		string(m.Priority),
 		m.ContentHash,
 		boolToInt(m.MentionAll),
+		boolToInt(m.MentionEveryone),
 		id,
 	)
 	if err != nil {
 		return errcode.Wrap(err, errcode.Internal, "apply send metadata")
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return errcode.Wrap(err, errcode.Internal, "rows affected")
+	}
+	if n == 0 {
+		return errcode.New(errcode.NotFound, "message %s not found", id)
+	}
+	return nil
+}
+
+// MergeMentionEveryone OR-merges flag into messages.mention_everyone.
+// Called by the ingester's conflict path (M9 Phase 1) so an echoed
+// `@everyone=true` survives a prior or subsequent send-side write of
+// false. NotFound if the row is missing — surface to caller so it can
+// decide whether the conflict id was real.
+func (r *messageRepo) MergeMentionEveryone(ctx context.Context, id string, flag bool) error {
+	if !flag {
+		// Nothing to merge: `MAX(existing, 0) = existing`, so the
+		// UPDATE would be a no-op write. Skip the disk hit entirely.
+		// Still verify the row exists so the caller's contract
+		// (NotFound when id is wrong) is preserved.
+		var dummy int
+		err := r.db.QueryRowContext(ctx,
+			`SELECT 1 FROM messages WHERE id = ?`, id).Scan(&dummy)
+		if errors.Is(err, sql.ErrNoRows) {
+			return errcode.New(errcode.NotFound, "message %s not found", id)
+		}
+		if err != nil {
+			return errcode.Wrap(err, errcode.Internal, "check message existence")
+		}
+		return nil
+	}
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE messages SET mention_everyone = 1 WHERE id = ?`, id)
+	if err != nil {
+		return errcode.Wrap(err, errcode.Internal, "merge mention_everyone")
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -240,16 +288,18 @@ type rowScanner interface {
 
 func scanMessageRow(row rowScanner) (*store.Message, error) {
 	var (
-		m           store.Message
-		authorID    sql.NullString
-		replyToID   sql.NullString
-		requiresAck int
-		priority    string
-		createdAt   int64
-		mentionAll  int
+		m               store.Message
+		authorID        sql.NullString
+		replyToID       sql.NullString
+		requiresAck     int
+		priority        string
+		createdAt       int64
+		mentionAll      int
+		mentionEveryone int
 	)
 	err := row.Scan(&m.ID, &m.RoomID, &authorID, &m.DiscordMsgID, &m.Content,
-		&replyToID, &requiresAck, &priority, &createdAt, &m.ContentHash, &mentionAll)
+		&replyToID, &requiresAck, &priority, &createdAt, &m.ContentHash,
+		&mentionAll, &mentionEveryone)
 	if err != nil {
 		return nil, err
 	}
@@ -259,5 +309,6 @@ func scanMessageRow(row rowScanner) (*store.Message, error) {
 	m.Priority = store.MessagePriority(priority)
 	m.CreatedAt = time.Unix(createdAt, 0).UTC()
 	m.MentionAll = mentionAll != 0
+	m.MentionEveryone = mentionEveryone != 0
 	return &m, nil
 }

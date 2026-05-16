@@ -188,6 +188,157 @@ func TestIngestExternalAuthorLeftEmpty(t *testing.T) {
 	assert.Nil(t, st.ReadAt)
 }
 
+func TestIngestPersistsDiscordMentions(t *testing.T) {
+	f := newFixture(t)
+	room := f.createRoom("r", "ch-mentions")
+	mentioned := f.createAccount("mentioned", "u-mentioned")
+	other := f.createAccount("other", "u-other")
+	f.addMember(mentioned.ID, room.ID, true)
+	f.addMember(other.ID, room.ID, true)
+
+	require.NoError(t, f.ingest(bot.EventMessageNew{Message: bot.Message{
+		ID:                  "dm-mentions",
+		ChannelID:           "ch-mentions",
+		AuthorID:            "u-external",
+		Content:             "please look",
+		CreatedAt:           time.Now(),
+		MentionedBotUserIDs: []string{"u-mentioned", "u-mentioned", "u-unknown"},
+		MentionEveryone:     true,
+	}}))
+
+	got, err := f.store.Bundle().Messages.GetByDiscordMsgID(context.Background(), "dm-mentions")
+	require.NoError(t, err)
+	assert.True(t, got.MentionEveryone)
+
+	mentions, err := f.store.Bundle().MessageMentions.ListForMessage(context.Background(), got.ID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{mentioned.ID}, mentions)
+}
+
+// M9 Phase 1 review P2-2: Discord MESSAGE_CREATE.mentions can name
+// accounts that are NOT current room members. The ingester must drop
+// those before writing message_mentions, otherwise non-members get
+// false mention rows that the state aggregator's joins can't always
+// shield (and that future read <room> endpoints would surface).
+func TestIngestDropsMentionsForNonMembers(t *testing.T) {
+	f := newFixture(t)
+	room := f.createRoom("r", "ch-non-member")
+	member := f.createAccount("inroom", "u-inroom")
+	stranger := f.createAccount("outroom", "u-outroom")
+	f.addMember(member.ID, room.ID, true)
+	// stranger has an agentchat account + bot_user_id but is NOT
+	// in this room.
+
+	require.NoError(t, f.ingest(bot.EventMessageNew{Message: bot.Message{
+		ID:                  "dm-non-member",
+		ChannelID:           "ch-non-member",
+		AuthorID:            "u-external",
+		Content:             "ping both",
+		CreatedAt:           time.Now(),
+		MentionedBotUserIDs: []string{"u-inroom", "u-outroom"},
+	}}))
+
+	got, err := f.store.Bundle().Messages.GetByDiscordMsgID(context.Background(), "dm-non-member")
+	require.NoError(t, err)
+
+	mentions, err := f.store.Bundle().MessageMentions.ListForMessage(context.Background(), got.ID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{member.ID}, mentions,
+		"stranger %s is not a room member; message_mentions must NOT include them",
+		stranger.ID)
+}
+
+// M9 Phase 1 review P2-1: when the send handler races ahead and writes
+// the messages row first, the gateway echo arriving later still
+// carries the authoritative Discord-side mention list. The ingester's
+// conflict path must merge that metadata in (mention_everyone OR-merge
+// + message_mentions union) rather than dropping it.
+func TestIngestConflictPathMergesMentionMetadata(t *testing.T) {
+	f := newFixture(t)
+	room := f.createRoom("r", "ch-conflict")
+	mentioned := f.createAccount("mentioned", "u-mentioned")
+	f.addMember(mentioned.ID, room.ID, true)
+
+	ctx := context.Background()
+
+	// Simulate the send-path write: a messages row with the same
+	// discord_msg_id, but no mention metadata yet (the M9 Phase 1
+	// send handler still mirrors --all to mention_everyone, but does
+	// NOT yet parse outbound `@name` — that's Phase 2). We hand-write
+	// the row directly to keep the test focused on the ingester.
+	existing := &store.Message{
+		ID:           "send-existing-id",
+		RoomID:       room.ID,
+		DiscordMsgID: "dm-conflict",
+		Content:      "send-side wrote first",
+		Priority:     store.PriorityNormal,
+		CreatedAt:    time.Now().UTC(),
+		ContentHash:  "h-conflict",
+	}
+	require.NoError(t, f.store.Bundle().Messages.Create(ctx, existing))
+
+	// Now the gateway echo arrives carrying real Discord mention
+	// metadata.
+	require.NoError(t, f.ingest(bot.EventMessageNew{Message: bot.Message{
+		ID:                  "dm-conflict",
+		ChannelID:           "ch-conflict",
+		AuthorID:            "u-external",
+		Content:             "echo with mentions",
+		CreatedAt:           time.Now(),
+		MentionedBotUserIDs: []string{"u-mentioned"},
+		MentionEveryone:     true,
+	}}))
+
+	merged, err := f.store.Bundle().Messages.GetByDiscordMsgID(ctx, "dm-conflict")
+	require.NoError(t, err)
+	assert.Equal(t, existing.ID, merged.ID, "conflict path must NOT replace the row")
+	assert.True(t, merged.MentionEveryone, "mention_everyone must be OR-merged in")
+
+	mentions, err := f.store.Bundle().MessageMentions.ListForMessage(ctx, merged.ID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{mentioned.ID}, mentions,
+		"per-user mention from echo must land in message_mentions")
+}
+
+// M9 Phase 1 review P2-1: ApplySendMetadata uses MAX(existing, new) on
+// mention_everyone so a later send-side write of false cannot clobber a
+// true that the ingester already observed from the gateway echo.
+func TestApplySendMetadataDoesNotClobberMentionEveryone(t *testing.T) {
+	f := newFixture(t)
+	room := f.createRoom("r", "ch-clobber")
+	ctx := context.Background()
+
+	// Pretend the ingester wrote the row first with mention_everyone=true.
+	row := &store.Message{
+		ID:              "ing-id",
+		RoomID:          room.ID,
+		DiscordMsgID:    "dm-clobber",
+		Content:         "from echo",
+		Priority:        store.PriorityNormal,
+		CreatedAt:       time.Now().UTC(),
+		ContentHash:     "h-clobber",
+		MentionEveryone: true,
+	}
+	require.NoError(t, f.store.Bundle().Messages.Create(ctx, row))
+
+	// Now the send handler races behind and calls ApplySendMetadata
+	// with MentionEveryone=false. The OR-merge must keep the existing
+	// true.
+	require.NoError(t, f.store.Bundle().Messages.ApplySendMetadata(ctx, row.ID, store.SendMetadata{
+		AuthorAccountID: "",
+		ReplyToMsgID:    "",
+		Priority:        store.PriorityNormal,
+		ContentHash:     "h-clobber",
+		MentionAll:      false,
+		MentionEveryone: false, // explicit false from send
+	}))
+
+	after, err := f.store.Bundle().Messages.Get(ctx, row.ID)
+	require.NoError(t, err)
+	assert.True(t, after.MentionEveryone,
+		"mention_everyone must stick after a subsequent send-side write of false")
+}
+
 func TestResolveAuthorEmptyDiscordUserID(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()

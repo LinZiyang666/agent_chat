@@ -39,6 +39,16 @@ type Message struct {
 	Content     string         `json:"content"`
 	CreatedAt   time.Time      `json:"created_at"`
 	Attachments []MsgAttachURL `json:"attachments,omitempty"`
+	// MentionedBotUserIDs is the list of platform user IDs the message
+	// directly @-mentions (M9). Discord populates this from the
+	// `MESSAGE_CREATE.mentions` array; non-Discord providers may
+	// leave it nil. Daemon ingester maps these to account IDs via
+	// accounts.bot_user_id.
+	MentionedBotUserIDs []string `json:"mentioned_bot_user_ids,omitempty"`
+	// MentionEveryone is true when the message includes an @everyone
+	// (Discord `MESSAGE_CREATE.mention_everyone`). Replaces the M6
+	// `--all` flag in M9.
+	MentionEveryone bool `json:"mention_everyone,omitempty"`
 }
 
 // MsgAttachURL describes an attachment as the bot Provider sees it

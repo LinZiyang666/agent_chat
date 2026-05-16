@@ -108,6 +108,16 @@ func (f *fx) state(msg, acc string, readAt, repliedAt *time.Time) {
 	}))
 }
 
+// mention writes a (msg_id, account_id) row into message_mentions,
+// simulating the ingester's resolution of Discord MESSAGE_CREATE.mentions
+// for the account (M9 Phase 1). Use this in tests that need to assert
+// mention-feed behaviour without going through the full Discord event
+// pipeline.
+func (f *fx) mention(msgID string, accountIDs ...string) {
+	require.NoError(f.t, f.store.Bundle().MessageMentions.SetForMessage(
+		context.Background(), msgID, accountIDs))
+}
+
 func TestEmptySnapshotShape(t *testing.T) {
 	f := newFx(t)
 	viewer := f.account("viewer", "u-viewer")
@@ -146,40 +156,78 @@ func TestSnapshotCountsUnreadOnlyForSubscribed(t *testing.T) {
 	assert.Equal(t, 1, snap.Rooms[0].Unread)
 }
 
-func TestSnapshotMentionsRequireBotUserID(t *testing.T) {
+// M9 Phase 1: mentions now come from the message_mentions table, not
+// from content `<@bot_user_id>` substring matching. The test fixture's
+// `mention()` helper writes the same row the ingester would write after
+// resolving Discord MESSAGE_CREATE.mentions[] via accounts.bot_user_id.
+func TestSnapshotMentionsFromMessageMentions(t *testing.T) {
 	f := newFx(t)
 	viewer := f.account("viewer", "u-viewer")
 	r := f.room("r")
 	f.member(viewer.ID, r.ID, true)
-	mention := f.message(r.ID, "hey <@u-viewer> please look")
+	mentionMsg := f.message(r.ID, "hey please look")
 	noMention := f.message(r.ID, "general chatter")
-	f.state(mention.ID, viewer.ID, nil, nil)
+	f.mention(mentionMsg.ID, viewer.ID)
+	f.state(mentionMsg.ID, viewer.ID, nil, nil)
 	f.state(noMention.ID, viewer.ID, nil, nil)
 
 	snap := f.build(viewer.ID)
 	require.Len(t, snap.Mentions, 1)
-	assert.Equal(t, mention.ID, snap.Mentions[0].MessageID)
+	assert.Equal(t, mentionMsg.ID, snap.Mentions[0].MessageID)
 	assert.Equal(t, 1, snap.Totals.Mentions)
 }
 
-func TestSnapshotMentionsEmptyWhenBotUserIDAbsent(t *testing.T) {
+// Mention rows are scoped per (message, account); a row pointing at
+// someone else must NOT surface in this viewer's mention feed.
+func TestSnapshotMentionsAccountScoped(t *testing.T) {
 	f := newFx(t)
-	// Viewer never came online → empty BotUserID.
-	now := time.Now().UTC()
-	id, err := uuid.NewV7()
-	require.NoError(t, err)
-	viewer := &store.Account{
-		ID: id.String(), Name: "novice", Role: store.RoleUser,
-		LifecycleState: store.LifecycleCreated, CreatedAt: now, UpdatedAt: now,
-	}
-	require.NoError(t, f.store.Bundle().Accounts.Create(context.Background(), viewer))
+	viewer := f.account("viewer", "u-viewer")
+	other := f.account("other", "u-other")
 	r := f.room("r")
 	f.member(viewer.ID, r.ID, true)
-	m := f.message(r.ID, "hey <@u-anyone>")
+	f.member(other.ID, r.ID, true)
+	m := f.message(r.ID, "talking to other")
+	f.mention(m.ID, other.ID)
+	f.state(m.ID, viewer.ID, nil, nil)
+	f.state(m.ID, other.ID, nil, nil)
+
+	snap := f.build(viewer.ID)
+	assert.Empty(t, snap.Mentions, "viewer was not in the mention set")
+	assert.Equal(t, 0, snap.Totals.Mentions)
+}
+
+// M9: a message with mention_everyone=1 mentions every member of the
+// room regardless of subscription state (preserves M6-P3-001 semantic).
+func TestSnapshotMentionsEveryoneCrossesSubscribed(t *testing.T) {
+	f := newFx(t)
+	viewer := f.account("viewer", "u-viewer")
+	r := f.room("r")
+	f.member(viewer.ID, r.ID, false) // 旁观 (unsubscribed)
+	m := f.message(r.ID, "all hands", func(m *store.Message) {
+		m.MentionEveryone = true
+	})
 	f.state(m.ID, viewer.ID, nil, nil)
 
 	snap := f.build(viewer.ID)
-	assert.Empty(t, snap.Mentions, "no bot_user_id → no mentions")
+	require.Len(t, snap.Mentions, 1, "@everyone reaches even unsubscribed members")
+	assert.Equal(t, m.ID, snap.Mentions[0].MessageID)
+	assert.Equal(t, 1, snap.Totals.Mentions)
+}
+
+// Per-user @ mentions stay subscribed-only — a targeted ping to an
+// unsubscribed (旁观) member must NOT promote them to the active state
+// UI.
+func TestSnapshotPerUserMentionRequiresSubscribed(t *testing.T) {
+	f := newFx(t)
+	viewer := f.account("viewer", "u-viewer")
+	r := f.room("r")
+	f.member(viewer.ID, r.ID, false)
+	m := f.message(r.ID, "hey")
+	f.mention(m.ID, viewer.ID)
+	f.state(m.ID, viewer.ID, nil, nil)
+
+	snap := f.build(viewer.ID)
+	assert.Empty(t, snap.Mentions, "per-user mention to unsubscribed member must not surface")
 	assert.Equal(t, 0, snap.Totals.Mentions)
 }
 
@@ -325,11 +373,12 @@ func TestPhase3TotalsAreNotCappedByFeedLimits(t *testing.T) {
 	f.member(viewer.ID, r.ID, true)
 
 	for i := 0; i < 55; i++ {
-		m := f.message(r.ID, "urgent ack <@u-viewer>", func(m *store.Message) {
+		m := f.message(r.ID, "urgent please ack", func(m *store.Message) {
 			m.RequiresAck = true
 			m.Priority = store.PriorityUrgent
 			m.CreatedAt = time.Now().Add(time.Duration(i) * time.Second).UTC()
 		})
+		f.mention(m.ID, viewer.ID)
 		f.state(m.ID, viewer.ID, nil, nil)
 	}
 
