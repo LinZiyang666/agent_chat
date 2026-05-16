@@ -29,13 +29,15 @@ func mustCreateM5Message(t *testing.T, s *Store, roomID, discordID, content stri
 	return m
 }
 
-func mustCreateM5State(t *testing.T, s *Store, messageID, accountID string, readAt, repliedAt *time.Time) {
+// mustCreateM5State seeds a per-account read state row. The M6-era
+// replied_at slot was removed in M9 Phase 2; the parameter survives
+// only to avoid churning every call site.
+func mustCreateM5State(t *testing.T, s *Store, messageID, accountID string, readAt, _ *time.Time) {
 	t.Helper()
 	require.NoError(t, s.Bundle().MessageStates.Upsert(context.Background(), &store.MessageState{
 		MessageID: messageID,
 		AccountID: accountID,
 		ReadAt:    readAt,
-		RepliedAt: repliedAt,
 	}))
 }
 
@@ -64,7 +66,6 @@ func TestM5MessageStateReadPathsScopeToSubscribedNonArchivedRooms(t *testing.T) 
 	// the M6 baseline but the source of truth is the new table.
 	makeMsg := func(roomID, discordID string) *store.Message {
 		m := mustCreateM5Message(t, s, roomID, discordID, "urgent please ack", func(m *store.Message) {
-			m.RequiresAck = true
 			m.Priority = store.PriorityUrgent
 		})
 		mustCreateM5State(t, s, m.ID, viewer.ID, nil, nil)
@@ -83,9 +84,6 @@ func TestM5MessageStateReadPathsScopeToSubscribedNonArchivedRooms(t *testing.T) 
 	mentions, err := repo.CountMentionsForSubscribed(context.Background(), viewer.ID, "bot-viewer")
 	require.NoError(t, err)
 	assert.Equal(t, 1, mentions)
-	pending, err := repo.CountPendingAcksForSubscribed(context.Background(), viewer.ID)
-	require.NoError(t, err)
-	assert.Equal(t, 1, pending)
 	priority, err := repo.CountPriorityForSubscribed(context.Background(), viewer.ID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, priority)
@@ -98,10 +96,6 @@ func TestM5MessageStateReadPathsScopeToSubscribedNonArchivedRooms(t *testing.T) 
 	require.NoError(t, err)
 	require.Len(t, mentionRows, 1)
 	assert.Equal(t, activeMsg.ID, mentionRows[0].ID)
-	ackRows, err := repo.ListPendingAcksForSubscribed(context.Background(), viewer.ID, 50)
-	require.NoError(t, err)
-	require.Len(t, ackRows, 1)
-	assert.Equal(t, activeMsg.ID, ackRows[0].ID)
 	priorityRows, err := repo.ListPriorityForSubscribed(context.Background(), viewer.ID, 50)
 	require.NoError(t, err)
 	require.Len(t, priorityRows, 1)

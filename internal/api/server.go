@@ -11,6 +11,7 @@ import (
 	apiv1 "github.com/LinZiyang666/agentchat/internal/api/v1"
 	"github.com/LinZiyang666/agentchat/internal/audit"
 	"github.com/LinZiyang666/agentchat/internal/auth"
+	"github.com/LinZiyang666/agentchat/internal/bot"
 	"github.com/LinZiyang666/agentchat/internal/connector"
 	"github.com/LinZiyang666/agentchat/internal/message"
 	"github.com/LinZiyang666/agentchat/internal/state"
@@ -48,6 +49,10 @@ type Deps struct {
 	// Handlers nil-check this field so test rigs that don't need
 	// state can leave it empty.
 	StateBus *state.Bus
+	// IdentityProber is the M9 Phase 2 seam set-discord uses to verify
+	// a candidate bot token before persisting it. In production this
+	// is a Discord REST client; tests inject mock.NewProber().
+	IdentityProber bot.IdentityProber
 }
 
 // NewRouter builds the chi router with the full /v1 surface. Returned
@@ -87,7 +92,7 @@ func NewRouter(d Deps) http.Handler {
 
 				// M3: Discord-side wiring (admin-only).
 				r.Post("/accounts/{id}/discord",
-					apiv1.SetDiscord(d.Bundler, d.Audit, d.MasterKey))
+					apiv1.SetDiscord(d.Bundler, d.Audit, d.MasterKey, d.IdentityProber))
 				r.Post("/accounts/{id}/online",
 					apiv1.OnlineAccount(d.Accounts, d.Connector, d.Bundler, d.Audit, d.MasterKey, d.Ingester))
 				r.Post("/accounts/{id}/offline",
@@ -118,9 +123,12 @@ func NewRouter(d Deps) http.Handler {
 			r.Patch("/memberships/{room_id}", apiv1.UpdateMembership(d.Bundler, d.Audit, d.StateBus))
 
 			r.Post("/rooms/{id}/messages", apiv1.SendMessage(d.Connector, d.Bundler, d.Audit, d.StateBus))
-			r.Get("/rooms/{id}/messages", apiv1.ListMessages(d.Bundler))
-			r.Post("/messages/{id}/read", apiv1.MarkRead(d.Bundler, d.Audit, d.StateBus))
-			r.Post("/messages/{id}/reply-ack", apiv1.ReplyAck(d.Bundler, d.Audit, d.StateBus))
+			// M9 Phase 2 unified read verb. GET /rooms/{id}/messages,
+			// POST /messages/{id}/read, POST /messages/{id}/reply-ack
+			// were retired here — callers use POST /rooms/{id}/read
+			// (default mode marks unread as read; --before paginates
+			// without side effects).
+			r.Post("/rooms/{id}/read", apiv1.ReadRoom(d.Bundler, d.Audit, d.StateBus))
 
 			// M6: announcements (room-scoped + per-announcement ack).
 			// Any member of the room can post (admins bypass the member

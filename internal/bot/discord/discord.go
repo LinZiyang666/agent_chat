@@ -206,56 +206,34 @@ func (p *Provider) SendMessage(_ context.Context, channelID, content string, opt
 	if err != nil {
 		return nil, err
 	}
-	// Fast path: no attachments → keep the two existing helper APIs
-	// (lower latency / simpler error tracebacks).
-	if len(opts.Attachments) == 0 {
-		var (
-			msg *discordgo.Message
-			e   error
-		)
-		if opts.ReplyToMessageID != "" {
-			msg, e = s.ChannelMessageSendReply(channelID, content, &discordgo.MessageReference{
-				MessageID: opts.ReplyToMessageID,
-				ChannelID: channelID,
-			})
-		} else {
-			msg, e = s.ChannelMessageSend(channelID, content)
-		}
-		if e != nil {
-			return nil, errcode.Wrap(e, errcode.Unavailable, "send discord message")
-		}
-		return discordToMessage(msg), nil
-	}
-	// Attachment path. Open each file once, defer close, then issue
-	// a single ChannelMessageSendComplex call.
-	files := make([]*discordgo.File, 0, len(opts.Attachments))
-	openHandles := make([]*os.File, 0, len(opts.Attachments))
-	defer func() {
-		for _, h := range openHandles {
-			_ = h.Close()
-		}
-	}()
-	for _, a := range opts.Attachments {
-		f, err := os.Open(a.Path)
-		if err != nil {
-			return nil, errcode.Wrap(err, errcode.InvalidArgument,
-				"open attachment %s", a.Path)
-		}
-		openHandles = append(openHandles, f)
-		name := a.FileName
-		if name == "" {
-			name = filepath.Base(a.Path)
-		}
-		df := &discordgo.File{
-			Name:        name,
-			ContentType: a.MIME,
-			Reader:      f,
-		}
-		files = append(files, df)
-	}
+
+	// M9 Phase 2: one Complex-path build for every send. The old
+	// split (ChannelMessageSend / ChannelMessageSendReply for the
+	// fast path) couldn't carry AllowedMentions cleanly, and the
+	// Reply helper internally devolves to a Complex call anyway —
+	// see discordgo/restapi.go:1829. Doing it ourselves lets
+	// AllowedMentions, attachments, and Reference share a single
+	// codepath.
 	send := &discordgo.MessageSend{
 		Content: content,
-		Files:   files,
+		AllowedMentions: &discordgo.MessageAllowedMentions{
+			// Default-deny: only IDs the daemon parser explicitly
+			// resolved get pinged. A stray `@everyone` literal in
+			// content with MentionAllowedEveryone=false renders but
+			// does not page anyone.
+			Parse: []discordgo.AllowedMentionType{},
+			Users: opts.MentionAllowedUserIDs,
+			// RepliedUser mirrors the Discord client default: a
+			// reply pings the original author. The reply-as-ping
+			// behaviour is what humans expect; the AllowedMentions
+			// declaration is explicit so the default-deny on Parse
+			// can't accidentally suppress it.
+			RepliedUser: opts.ReplyToMessageID != "",
+		},
+	}
+	if opts.MentionAllowedEveryone {
+		send.AllowedMentions.Parse = append(send.AllowedMentions.Parse,
+			discordgo.AllowedMentionTypeEveryone)
 	}
 	if opts.ReplyToMessageID != "" {
 		send.Reference = &discordgo.MessageReference{
@@ -263,9 +241,42 @@ func (p *Provider) SendMessage(_ context.Context, channelID, content string, opt
 			ChannelID: channelID,
 		}
 	}
+
+	// Attachments: open here, close after the Complex call returns.
+	// Open errors surface as InvalidArgument (the caller's path is
+	// suspect); upload errors as Unavailable (Discord is the
+	// authority).
+	if len(opts.Attachments) > 0 {
+		files := make([]*discordgo.File, 0, len(opts.Attachments))
+		openHandles := make([]*os.File, 0, len(opts.Attachments))
+		defer func() {
+			for _, h := range openHandles {
+				_ = h.Close()
+			}
+		}()
+		for _, a := range opts.Attachments {
+			f, err := os.Open(a.Path)
+			if err != nil {
+				return nil, errcode.Wrap(err, errcode.InvalidArgument,
+					"open attachment %s", a.Path)
+			}
+			openHandles = append(openHandles, f)
+			name := a.FileName
+			if name == "" {
+				name = filepath.Base(a.Path)
+			}
+			files = append(files, &discordgo.File{
+				Name:        name,
+				ContentType: a.MIME,
+				Reader:      f,
+			})
+		}
+		send.Files = files
+	}
+
 	msg, e := s.ChannelMessageSendComplex(channelID, send)
 	if e != nil {
-		return nil, errcode.Wrap(e, errcode.Unavailable, "send discord message with attachments")
+		return nil, errcode.Wrap(e, errcode.Unavailable, "send discord message")
 	}
 	return discordToMessage(msg), nil
 }

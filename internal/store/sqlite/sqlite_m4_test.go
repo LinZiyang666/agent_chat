@@ -373,11 +373,12 @@ func TestMessageApplySendMetadata(t *testing.T) {
 	}
 	require.NoError(t, s.Bundle().Messages.Create(context.Background(), preexisting))
 
-	// Apply send-path metadata.
+	// Apply send-path metadata. M9 Phase 2 trimmed SendMetadata down
+	// to the still-write-owned columns (author, reply, priority,
+	// content_hash, mention_everyone).
 	require.NoError(t, s.Bundle().Messages.ApplySendMetadata(context.Background(), preexisting.ID, store.SendMetadata{
 		AuthorAccountID: author.ID,
 		ReplyToMsgID:    "",
-		RequiresAck:     true,
 		Priority:        store.PriorityUrgent,
 		ContentHash:     "sender-hash",
 	}))
@@ -385,7 +386,6 @@ func TestMessageApplySendMetadata(t *testing.T) {
 	got, err := s.Bundle().Messages.Get(context.Background(), preexisting.ID)
 	require.NoError(t, err)
 	assert.Equal(t, author.ID, got.AuthorAccountID)
-	assert.True(t, got.RequiresAck)
 	assert.Equal(t, store.PriorityUrgent, got.Priority)
 	assert.Equal(t, "sender-hash", got.ContentHash)
 

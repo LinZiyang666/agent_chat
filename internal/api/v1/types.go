@@ -147,14 +147,9 @@ type UpdateMembershipRequest struct {
 
 // SendMessageRequest is the body of POST /v1/rooms/{id}/messages.
 type SendMessageRequest struct {
-	Content     string `json:"content"`
-	ReplyToID   string `json:"reply_to_id,omitempty"`
-	RequiresAck bool   `json:"requires_ack,omitempty"`
-	Priority    string `json:"priority,omitempty"`
-	// MentionAll (M6) signals @all: every member of the room sees the
-	// message in their mentions feed, in addition to the literal
-	// "<@bot_user_id>" content match. Off by default.
-	MentionAll bool `json:"mention_all,omitempty"`
+	Content   string `json:"content"`
+	ReplyToID string `json:"reply_to_id,omitempty"`
+	Priority  string `json:"priority,omitempty"`
 	// Attachments (M7) are local file paths the daemon reads and
 	// uploads to Discord alongside the message. Discord caps each
 	// file at 10 MB on the free tier (lowered from 25 MB in
@@ -174,18 +169,41 @@ type SendAttachmentRequest struct {
 
 // MessageResponse is the public shape of a Message row.
 type MessageResponse struct {
-	ID              string               `json:"id"`
-	RoomID          string               `json:"room_id"`
-	AuthorAccountID string               `json:"author_account_id,omitempty"`
-	DiscordMsgID    string               `json:"discord_msg_id"`
-	Content         string               `json:"content"`
-	ReplyToMsgID    string               `json:"reply_to_msg_id,omitempty"`
-	RequiresAck     bool                 `json:"requires_ack"`
-	Priority        string               `json:"priority"`
-	CreatedAt       time.Time            `json:"created_at"`
-	ContentHash     string               `json:"content_hash"`
-	MentionAll      bool                 `json:"mention_all,omitempty"`
-	Attachments     []AttachmentResponse `json:"attachments,omitempty"`
+	ID              string `json:"id"`
+	RoomID          string `json:"room_id"`
+	AuthorAccountID string `json:"author_account_id,omitempty"`
+	// AuthorName (M9 Phase 2) is the agentchat account.Name of the
+	// author at the time the row is rendered. Empty when the message
+	// came from a Discord user that doesn't map to an account, or
+	// when the lookup wasn't performed. ReadRoom hydrates this; the
+	// raw message-row helpers may leave it blank.
+	AuthorName   string `json:"author_name,omitempty"`
+	DiscordMsgID string `json:"discord_msg_id"`
+	Content      string `json:"content"`
+	// DisplayContent (M9 Phase 2) is `Content` with every
+	// `<@bot_user_id>` substituted for `@<name>` looked up against
+	// the same hydration table that populated Mentions. Suitable
+	// for plain-text rendering; agents that need to match on ids
+	// should still parse `Content`. Hydrated by ReadRoom only.
+	DisplayContent string    `json:"display_content,omitempty"`
+	ReplyToMsgID   string    `json:"reply_to_msg_id,omitempty"`
+	Priority       string    `json:"priority"`
+	CreatedAt      time.Time `json:"created_at"`
+	ContentHash    string    `json:"content_hash"`
+	// ReadAt (M9 Phase 2) is the caller's per-account read timestamp
+	// for this message. nil = unread for the caller. Hydrated by
+	// ReadRoom; other paths (e.g. the legacy MessageResponse from
+	// SendMessage) leave it blank.
+	ReadAt *time.Time `json:"read_at,omitempty"`
+	// MentionEveryone (M9): mirrors messages.mention_everyone. The
+	// content carries an @everyone literal AND was authorized by the
+	// outbound parser (or arrived flagged on a Discord ingest).
+	MentionEveryone bool `json:"mention_everyone,omitempty"`
+	// Mentions (M9): per-account ids this message @-mentions
+	// (excluding @everyone, which is on MentionEveryone). Populated
+	// from message_mentions; absent / empty when no targeted ping.
+	Mentions    []string             `json:"mentions,omitempty"`
+	Attachments []AttachmentResponse `json:"attachments,omitempty"`
 }
 
 // AttachmentResponse is the public shape of an Attachment row (M7).
@@ -208,12 +226,44 @@ type MessageListResponse struct {
 	Messages []MessageResponse `json:"messages"`
 }
 
+// ReadRoomRequest is the optional body of POST /v1/rooms/{id}/read
+// (M9 Phase 2). All fields are optional. The handler accepts a nil
+// body and uses defaults.
+type ReadRoomRequest struct {
+	// Limit is the number of read-history context messages to
+	// return alongside the unread set. Unread messages are NOT
+	// capped by Limit. Default 10, max 200.
+	Limit int `json:"limit,omitempty"`
+	// Before, if non-empty, switches the call into pure-query mode:
+	// returns Limit messages older than this message id and does NOT
+	// mark anything as read. Used to paginate history.
+	Before string `json:"before,omitempty"`
+}
+
+// ReadRoomResponse is the body of POST /v1/rooms/{id}/read.
+type ReadRoomResponse struct {
+	Room       ReadRoomRoom      `json:"room"`
+	MarkedRead []string          `json:"marked_read"`
+	Messages   []MessageResponse `json:"messages"`
+	More       bool              `json:"more"`
+}
+
+// ReadRoomRoom is the slim room descriptor embedded in a read-room
+// response. Snipped down from full RoomResponse: callers using read
+// already know the room id and don't need archived / created_at.
+type ReadRoomRoom struct {
+	ID                    string `json:"id"`
+	Name                  string `json:"name"`
+	Subscribed            bool   `json:"subscribed"`
+	CurrentAnnouncementID string `json:"current_announcement_id,omitempty"`
+}
+
 // MessageStateResponse is the public shape of a MessageState row.
+// M9 Phase 2 retired the RepliedAt timestamp alongside requires_ack.
 type MessageStateResponse struct {
 	MessageID string     `json:"message_id"`
 	AccountID string     `json:"account_id"`
 	ReadAt    *time.Time `json:"read_at,omitempty"`
-	RepliedAt *time.Time `json:"replied_at,omitempty"`
 }
 
 // --- M6: announcements ----------------------------------------------------

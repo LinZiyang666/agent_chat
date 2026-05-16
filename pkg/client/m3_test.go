@@ -71,15 +71,16 @@ func startM3TestDaemon(t *testing.T) (sock, token string, latestProvider func() 
 	t.Cleanup(func() { conn.Shutdown(context.Background()) })
 
 	router := api.NewRouter(api.Deps{
-		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Accounts:    svc,
-		AccountRepo: bundle.Accounts,
-		TokenRepo:   bundle.Tokens,
-		Auth:        mgr,
-		Audit:       rec,
-		Bundler:     s,
-		Connector:   conn,
-		MasterKey:   key,
+		Log:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Accounts:       svc,
+		AccountRepo:    bundle.Accounts,
+		TokenRepo:      bundle.Tokens,
+		Auth:           mgr,
+		Audit:          rec,
+		Bundler:        s,
+		Connector:      conn,
+		MasterKey:      key,
+		IdentityProber: mock.NewProber(),
 	})
 
 	ln, err := net.Listen("unix", sock)

@@ -329,7 +329,6 @@ func TestApplySendMetadataDoesNotClobberMentionEveryone(t *testing.T) {
 		ReplyToMsgID:    "",
 		Priority:        store.PriorityNormal,
 		ContentHash:     "h-clobber",
-		MentionAll:      false,
 		MentionEveryone: false, // explicit false from send
 	}))
 

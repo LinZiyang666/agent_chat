@@ -180,11 +180,10 @@ func MessageToResponse(m *store.Message) MessageResponse {
 		DiscordMsgID:    m.DiscordMsgID,
 		Content:         m.Content,
 		ReplyToMsgID:    m.ReplyToMsgID,
-		RequiresAck:     m.RequiresAck,
 		Priority:        string(m.Priority),
 		CreatedAt:       m.CreatedAt,
 		ContentHash:     m.ContentHash,
-		MentionAll:      m.MentionAll,
+		MentionEveryone: m.MentionEveryone,
 	}
 }
 
@@ -252,10 +251,6 @@ func MessageStateToResponse(s *store.MessageState) MessageStateResponse {
 	if s.ReadAt != nil {
 		v := s.ReadAt.UTC()
 		out.ReadAt = &v
-	}
-	if s.RepliedAt != nil {
-		v := s.RepliedAt.UTC()
-		out.RepliedAt = &v
 	}
 	return out
 }

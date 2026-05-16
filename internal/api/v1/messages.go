@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
+	"regexp"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -110,7 +110,9 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 
 		// Resolve room + actor role + membership + reply target inside
 		// a quick read-only WithTx so we don't accidentally see a torn
-		// view.
+		// view. Also collect the room's current member set + each
+		// member's bot identity here so the M9 Phase 2 outbound
+		// mention parser runs against a consistent snapshot.
 		//
 		// Membership gate (M4-P3-004 fix): per requirements §5.1
 		// "发：admin 不受限；user 只能在自己所属的群里发". Admins are
@@ -120,6 +122,7 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 			room         *store.Room
 			replyDiscord string
 			replyParent  *store.Message
+			roomMembers  []bot.RoomMember
 		)
 		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {
 			rr, err := b.Rooms.Get(r.Context(), roomID)
@@ -167,11 +170,59 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 				replyDiscord = parent.DiscordMsgID
 				replyParent = parent
 			}
+			// M9 Phase 2: assemble RoomMember snapshot for the
+			// outbound mention parser. List memberships (account_id
+			// only), then one Accounts.List walk to attach Name +
+			// BotUserID. Account count is small (Discord caps
+			// individual developers at ~10 applications, D3.1) so
+			// the linear scan is fine.
+			memberships, err := b.Memberships.ListByRoom(r.Context(), roomID)
+			if err != nil {
+				return err
+			}
+			if len(memberships) == 0 {
+				return nil
+			}
+			accs, err := b.Accounts.List(r.Context())
+			if err != nil {
+				return err
+			}
+			byID := make(map[string]*store.Account, len(accs))
+			for _, ac := range accs {
+				byID[ac.ID] = ac
+			}
+			roomMembers = make([]bot.RoomMember, 0, len(memberships))
+			for _, m := range memberships {
+				ac, ok := byID[m.AccountID]
+				if !ok {
+					continue
+				}
+				roomMembers = append(roomMembers, bot.RoomMember{
+					AccountID: ac.ID,
+					Name:      ac.Name,
+					BotUserID: ac.BotUserID,
+				})
+			}
 			return nil
 		}); err != nil {
 			WriteError(w, err)
 			return
 		}
+
+		// M9 Phase 2: parse outbound @-mentions BEFORE handing off to
+		// Discord. The rewritten content (with `@<name>` substituted
+		// for `<@bot_user_id>`) is what we send AND what we persist;
+		// the allow-list slices feed Discord's AllowedMentions so
+		// only resolved targets actually get pinged.
+		parsed, err := bot.ParseMentions(req.Content, roomMembers)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		// M9 Phase 2: the only source of @everyone is the outbound
+		// parser. The legacy `--all` / `req.MentionAll` flag was
+		// removed in this milestone.
+		allowEveryone := parsed.Everyone
 
 		// M7 attachment pre-flight — runs AFTER authz (room exists +
 		// member-or-admin). The per-file size guard enforces the
@@ -239,40 +290,40 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 		}
 
 		// Slow: Discord send. Outside tx.
-		sent, err := p.SendMessage(r.Context(), room.DiscordChannelID, req.Content, bot.SendOptions{
-			ReplyToMessageID: replyDiscord,
-			Attachments:      uploads,
+		sent, err := p.SendMessage(r.Context(), room.DiscordChannelID, parsed.RewrittenContent, bot.SendOptions{
+			ReplyToMessageID:       replyDiscord,
+			Attachments:            uploads,
+			MentionAllowedUserIDs:  parsed.BotUserIDs,
+			MentionAllowedEveryone: allowEveryone,
 		})
 		if err != nil {
 			WriteError(w, err)
 			return
 		}
 
-		// Persist + fan-out states.
+		// Persist + fan-out states. We store the REWRITTEN content
+		// (with `<@bot_user_id>` substitutions) so history readers
+		// see the same form Discord rendered, and content_hash hashes
+		// what we actually stored.
 		msgID, err := uuid.NewV7()
 		if err != nil {
 			WriteError(w, errcode.Wrap(err, errcode.Internal, "uuidv7"))
 			return
 		}
-		hash := sha256.Sum256([]byte(req.Content))
+		hash := sha256.Sum256([]byte(parsed.RewrittenContent))
 		now := time.Now().UTC()
 		msg := &store.Message{
 			ID:              msgID.String(),
 			RoomID:          roomID,
 			AuthorAccountID: actor.ID,
 			DiscordMsgID:    sent.ID,
-			Content:         req.Content,
+			Content:         parsed.RewrittenContent,
 			Priority:        priority,
-			RequiresAck:     req.RequiresAck,
 			CreatedAt:       sent.CreatedAt.UTC(),
 			ContentHash:     hex.EncodeToString(hash[:]),
-			MentionAll:      req.MentionAll,
-			// M9 Phase 1: mirror --all to MentionEveryone so the new
-			// state.CountMentionsForSubscribed (which reads
-			// mention_everyone) sees legacy send-path @all without
-			// requiring the API surface to change yet. Phase 2 drops
-			// MentionAll entirely.
-			MentionEveryone: req.MentionAll,
+			// M9 Phase 2: mention_everyone is sourced from the
+			// outbound parser. requires_ack / mention_all retired.
+			MentionEveryone: allowEveryone,
 		}
 		if replyParent != nil {
 			msg.ReplyToMsgID = replyParent.ID
@@ -307,10 +358,8 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 				if err := b.Messages.ApplySendMetadata(r.Context(), persistedID, store.SendMetadata{
 					AuthorAccountID: actor.ID,
 					ReplyToMsgID:    msg.ReplyToMsgID,
-					RequiresAck:     msg.RequiresAck,
 					Priority:        msg.Priority,
 					ContentHash:     msg.ContentHash,
-					MentionAll:      msg.MentionAll,
 					MentionEveryone: msg.MentionEveryone,
 				}); err != nil {
 					return err
@@ -325,6 +374,17 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 			members, err := b.Memberships.ListByRoom(r.Context(), roomID)
 			if err != nil {
 				return err
+			}
+			// M9 Phase 2: persist per-account mention rows resolved by
+			// the outbound parser. AddForMessage uses INSERT OR IGNORE
+			// so a later ingester echo merging in the same accounts is
+			// idempotent — and the conflict path is safe in either
+			// direction (P2-1 review fix).
+			if len(parsed.MentionedAccountIDs) > 0 {
+				if err := b.MessageMentions.AddForMessage(
+					r.Context(), effectiveID, parsed.MentionedAccountIDs); err != nil {
+					return err
+				}
 			}
 			nowPtr := now
 			for _, m := range members {
@@ -395,9 +455,9 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 				audit.ActionMessageSend, effectiveID, map[string]any{
 					"room_id":          roomID,
 					"discord_msg_id":   sent.ID,
-					"requires_ack":     req.RequiresAck,
 					"priority":         string(priority),
-					"mention_all":      req.MentionAll,
+					"mention_everyone": allowEveryone,
+					"mentions":         len(parsed.MentionedAccountIDs),
 					"attachments":      len(uploads),
 					"race_with_ingest": !inserted,
 				})
@@ -474,9 +534,54 @@ func publishRoomMembers(bus *state.Bus, bundler store.Bundler, roomID string) {
 	}
 }
 
-// ListMessages handles GET /v1/rooms/{id}/messages?before=&limit=.
-// Members of the room (and admins) can list.
-func ListMessages(bundler store.Bundler) http.HandlerFunc {
+// rawMentionRenderRe matches the Discord-native `<@id>` mention syntax
+// produced by the outbound parser. The id character class is
+// deliberately loose ([\w-]+) so mock fixtures using non-numeric IDs
+// like `<@u-alice>` are rendered the same way real Discord snowflakes
+// are. `<#id>` (channel) and `<@&roleid>` (role) are excluded —
+// agentchat doesn't model those.
+var rawMentionRenderRe = regexp.MustCompile(`<@!?([\w-]+)>`)
+
+// renderDisplayContent replaces every `<@bot_user_id>` token in
+// content with `@<name>` if the id maps to a known agentchat
+// account; unknown ids are preserved verbatim. Used by ReadRoom to
+// populate MessageResponse.DisplayContent (M9 Phase 2).
+func renderDisplayContent(content string, nameByBotUserID map[string]string) string {
+	if content == "" || len(nameByBotUserID) == 0 {
+		return content
+	}
+	return rawMentionRenderRe.ReplaceAllStringFunc(content, func(match string) string {
+		// Strip the surrounding `<@` / `<@!` and `>` to get the id.
+		idStart := 2
+		if len(match) > 2 && match[2] == '!' {
+			idStart = 3
+		}
+		id := match[idStart : len(match)-1]
+		if name, ok := nameByBotUserID[id]; ok && name != "" {
+			return "@" + name
+		}
+		return match
+	})
+}
+
+// ReadRoom handles POST /v1/rooms/{id}/read (M9 Phase 2).
+//
+// Default mode (no `before`):
+//  1. Authorize: actor must be a member of the room (admins OK; same
+//     gate as SendMessage). NotFound on the room is folded into
+//     PERM_DENIED so id enumeration via response code is shut down,
+//     matching the M8-S-P2-009 hardening on per-message routes.
+//  2. List unread messages for the actor in this room (cap 200) and
+//     read-history (cap = req.Limit, default 10) in one tx.
+//  3. UPSERT message_states.read_at = now for every unread row.
+//  4. publish(actor) once after commit so the aggregator recomputes
+//     state.totals.unread / mentions / priority.
+//
+// `before` mode: skips step 3 entirely (pure history paging) and uses
+// MessageRepo.List(BeforeID) so the caller can scroll back without
+// touching read state. This is the only legal way to read messages
+// older than what the unread/context window returned.
+func ReadRoom(bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		roomID := chi.URLParam(r, "id")
 		actor, ok := auth.AccountFromContext(r.Context())
@@ -484,149 +589,245 @@ func ListMessages(bundler store.Bundler) http.HandlerFunc {
 			WriteError(w, errcode.New(errcode.Internal, "no actor in context"))
 			return
 		}
-		limit := 0
-		if v := r.URL.Query().Get("limit"); v != "" {
-			parsed, err := strconv.Atoi(v)
-			if err != nil || parsed < 0 {
-				WriteError(w, errcode.New(errcode.InvalidArgument,
-					"limit must be a non-negative integer"))
+		// Body is optional. An empty body decodes into the zero
+		// ReadRoomRequest, which yields the defaults.
+		var req ReadRoomRequest
+		if r.ContentLength > 0 {
+			if err := DecodeJSON(r, &req); err != nil {
+				WriteError(w, err)
 				return
 			}
-			limit = parsed
 		}
-		before := r.URL.Query().Get("before")
-		var messages []*store.Message
+		if req.Limit < 0 {
+			WriteError(w, errcode.New(errcode.InvalidArgument, "limit must be non-negative"))
+			return
+		}
+		// Defaults follow docs/06-cli-redesign.md §3.3:
+		//   - default mode (no --before): 10 context messages
+		//   - --before pagination:          50 history messages
+		// Both modes share a hard ceiling of 200.
+		ctxLimit := req.Limit
+		if ctxLimit == 0 {
+			if req.Before != "" {
+				ctxLimit = 50
+			} else {
+				ctxLimit = 10
+			}
+		}
+		if ctxLimit > 200 {
+			ctxLimit = 200
+		}
+
+		var (
+			roomRow    *store.Room
+			subscribed bool
+			messages   []*store.Message
+			markedRead []string
+			more       bool
+		)
+		now := time.Now().UTC()
+
 		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {
-			if _, err := b.Rooms.Get(r.Context(), roomID); err != nil {
+			rr, err := b.Rooms.Get(r.Context(), roomID)
+			if err != nil {
+				if ec, _ := errcode.As(err); ec != nil && ec.Code == errcode.NotFound {
+					return errcode.New(errcode.PermDenied,
+						"actor %s cannot access room %s", actor.ID, roomID)
+				}
 				return err
 			}
+			roomRow = rr
 			a, err := b.Accounts.Get(r.Context(), actor.ID)
 			if err != nil {
 				return err
 			}
 			if a.Role != store.RoleAdmin {
-				if _, err := b.Memberships.Get(r.Context(), actor.ID, roomID); err != nil {
+				mb, err := b.Memberships.Get(r.Context(), actor.ID, roomID)
+				if err != nil {
 					if ec, _ := errcode.As(err); ec != nil && ec.Code == errcode.NotFound {
 						return errcode.New(errcode.PermDenied,
 							"actor %s is not a member of room %s", actor.ID, roomID)
 					}
 					return err
 				}
+				subscribed = mb.Subscribed
+			} else {
+				// Admins can read any room; subscribed is "yes" if they
+				// have an explicit membership row (which not all admins
+				// do — system admins frequently use the override path).
+				if mb, err := b.Memberships.Get(r.Context(), actor.ID, roomID); err == nil {
+					subscribed = mb.Subscribed
+				}
 			}
-			ms, err := b.Messages.List(r.Context(), store.MessageFilter{
-				RoomID:   roomID,
-				BeforeID: before,
-				Limit:    limit,
-			})
+
+			if req.Before != "" {
+				// Pure-query path: history page before a given id,
+				// no read-state mutation.
+				rows, err := b.Messages.List(r.Context(), store.MessageFilter{
+					RoomID:   roomID,
+					BeforeID: req.Before,
+					Limit:    ctxLimit,
+				})
+				if err != nil {
+					return err
+				}
+				messages = rows
+				more = len(rows) == ctxLimit
+				return nil
+			}
+
+			// Default path: unread (cap 200) + read history (ctxLimit).
+			unread, err := b.Messages.ListUnreadForAccountInRoom(r.Context(), actor.ID, roomID, 200)
 			if err != nil {
 				return err
 			}
-			messages = ms
+			ctx, err := b.Messages.ListReadHistoryForAccountInRoom(r.Context(), actor.ID, roomID, ctxLimit)
+			if err != nil {
+				return err
+			}
+			// Mark unread as read in the same tx so observers can't
+			// see an intermediate state.
+			markedRead = make([]string, 0, len(unread))
+			for _, m := range unread {
+				st := &store.MessageState{
+					MessageID: m.ID,
+					AccountID: actor.ID,
+					ReadAt:    &now,
+				}
+				if err := b.MessageStates.Upsert(r.Context(), st); err != nil {
+					return err
+				}
+				markedRead = append(markedRead, m.ID)
+				if err := recorder.RecordVia(r.Context(), b.Audit, actor.ID,
+					audit.ActionMessageRead, m.ID, nil); err != nil {
+					return err
+				}
+			}
+			// Combine and sort oldest -> newest. Both source lists are
+			// newest-first; reverse them while concatenating.
+			messages = make([]*store.Message, 0, len(unread)+len(ctx))
+			for i := len(ctx) - 1; i >= 0; i-- {
+				messages = append(messages, ctx[i])
+			}
+			for i := len(unread) - 1; i >= 0; i-- {
+				messages = append(messages, unread[i])
+			}
+			// "more" hint: unread feed was capped → caller may need
+			// to call read again (or use --before) to drain the rest.
+			more = len(unread) == 200
 			return nil
 		}); err != nil {
 			WriteError(w, err)
 			return
 		}
-		// M7: batch-load attachments for all returned messages in one
-		// round-trip to keep ListMessages O(1) DB calls regardless
-		// of attachment count.
+
+		// Hydrate the response. We need the room-level pieces
+		// (current_announcement_id, the account-name lookup tables)
+		// unconditionally — they describe the room itself, not the
+		// returned message slice — so the tx runs even when
+		// `messages` is empty (a freshly-created room or a viewer
+		// that has read everything still needs an accurate
+		// `room.current_announcement_id`, P2-a review fix).
 		ids := make([]string, 0, len(messages))
 		for _, m := range messages {
 			ids = append(ids, m.ID)
 		}
-		var attByMsg map[string][]*store.Attachment
-		if len(ids) > 0 {
-			_ = bundler.WithTx(r.Context(), func(b store.Bundle) error {
-				m, err := b.Attachments.ListByMessages(r.Context(), ids)
-				if err != nil {
-					return err
+		var (
+			attByMsg      map[string][]*store.Attachment
+			mentionsByID  = map[string][]string{}
+			nameByAccount = map[string]string{}
+			nameByBotUser = map[string]string{}
+			readAtByMsg   = map[string]time.Time{}
+			currentAnnID  string
+		)
+		_ = bundler.WithTx(r.Context(), func(b store.Bundle) error {
+			// Per-message hydration — skipped if there are no
+			// messages to enrich.
+			if len(ids) > 0 {
+				if rows, err := b.Attachments.ListByMessages(r.Context(), ids); err == nil {
+					attByMsg = rows
 				}
-				attByMsg = m
-				return nil
-			})
-		}
+				for _, id := range ids {
+					accs, err := b.MessageMentions.ListForMessage(r.Context(), id)
+					if err != nil {
+						continue
+					}
+					if len(accs) > 0 {
+						mentionsByID[id] = accs
+					}
+				}
+				// Per-account read timestamps for THIS caller, so the
+				// response can carry read_at per row (designed in
+				// docs/06-cli-redesign.md §3.4). One Get per message
+				// is acceptable at our scale (cap 200); a bulk
+				// variant can replace this if profiles flag it.
+				for _, id := range ids {
+					st, err := b.MessageStates.Get(r.Context(), id, actor.ID)
+					if err != nil || st == nil || st.ReadAt == nil {
+						continue
+					}
+					readAtByMsg[id] = *st.ReadAt
+				}
+			}
+			// Room-level hydration: always run.
+			// Build account.id / bot_user_id -> name maps. The
+			// account list is small (Discord caps individual devs
+			// at ~10 applications) so List + linear-scan is fine.
+			if accounts, err := b.Accounts.List(r.Context()); err == nil {
+				for _, a := range accounts {
+					nameByAccount[a.ID] = a.Name
+					if a.BotUserID != "" {
+						nameByBotUser[a.BotUserID] = a.Name
+					}
+				}
+			}
+			// Current room announcement id (latest version, if any).
+			if ann, err := b.Announcements.Latest(r.Context(), roomRow.ID); err == nil && ann != nil {
+				currentAnnID = ann.ID
+			}
+			return nil
+		})
 
-		out := MessageListResponse{Messages: make([]MessageResponse, 0, len(messages))}
+		out := ReadRoomResponse{
+			Room: ReadRoomRoom{
+				ID:                    roomRow.ID,
+				Name:                  roomRow.Name,
+				Subscribed:            subscribed,
+				CurrentAnnouncementID: currentAnnID,
+			},
+			MarkedRead: markedRead,
+			Messages:   make([]MessageResponse, 0, len(messages)),
+			More:       more,
+		}
+		if markedRead == nil {
+			out.MarkedRead = []string{}
+		}
 		for _, m := range messages {
 			resp := MessageToResponse(m)
+			resp.AuthorName = nameByAccount[m.AuthorAccountID]
+			resp.DisplayContent = renderDisplayContent(m.Content, nameByBotUser)
+			if t, ok := readAtByMsg[m.ID]; ok {
+				v := t.UTC()
+				resp.ReadAt = &v
+			}
 			if rows, ok := attByMsg[m.ID]; ok && len(rows) > 0 {
 				resp.Attachments = make([]AttachmentResponse, 0, len(rows))
 				for _, a := range rows {
 					resp.Attachments = append(resp.Attachments, AttachmentToResponse(a))
 				}
 			}
+			if accs, ok := mentionsByID[m.ID]; ok {
+				resp.Mentions = accs
+			}
 			out.Messages = append(out.Messages, resp)
 		}
+
+		// Publish AFTER the read tx commits so watchers don't see a
+		// rebuild based on uncommitted state. Skip when no read
+		// happened (--before path) to avoid spurious snapshot rebuilds.
+		if len(markedRead) > 0 {
+			bus.Publish(actor.ID)
+		}
 		WriteJSON(w, http.StatusOK, out)
-	}
-}
-
-// MarkRead handles POST /v1/messages/{id}/read.
-func MarkRead(bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus) http.HandlerFunc {
-	return mutateMessageState(bundler, recorder, bus, audit.ActionMessageRead,
-		func(now time.Time, s *store.MessageState) { s.ReadAt = &now })
-}
-
-// ReplyAck handles POST /v1/messages/{id}/reply-ack.
-func ReplyAck(bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus) http.HandlerFunc {
-	return mutateMessageState(bundler, recorder, bus, audit.ActionMessageReplyAck,
-		func(now time.Time, s *store.MessageState) { s.RepliedAt = &now })
-}
-
-// mutateMessageState is the shared body for MarkRead and ReplyAck: the
-// actor sets one of the two timestamps on their own MessageState row
-// (which may not yet exist).
-func mutateMessageState(bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus,
-	action audit.Action,
-	patch func(now time.Time, s *store.MessageState),
-) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		messageID := chi.URLParam(r, "id")
-		actor, ok := auth.AccountFromContext(r.Context())
-		if !ok {
-			WriteError(w, errcode.New(errcode.Internal, "no actor in context"))
-			return
-		}
-		var out *store.MessageState
-		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {
-			msg, err := b.Messages.Get(r.Context(), messageID)
-			if err != nil {
-				// M8-S-P2-009: collapse NotFound into PermDenied so a
-				// caller cannot enumerate message ids by status-code
-				// timing. UUIDv7 ids are time-sortable, which would
-				// otherwise let an attacker who learned one valid id
-				// fingerprint neighbouring ids' activity.
-				if ec, _ := errcode.As(err); ec != nil && ec.Code == errcode.NotFound {
-					return errcode.New(errcode.PermDenied,
-						"actor %s cannot access message %s", actor.ID, messageID)
-				}
-				return err
-			}
-			if _, err := b.Memberships.Get(r.Context(), actor.ID, msg.RoomID); err != nil {
-				if ec, _ := errcode.As(err); ec != nil && ec.Code == errcode.NotFound {
-					return errcode.New(errcode.PermDenied,
-						"actor %s is not a member of room %s", actor.ID, msg.RoomID)
-				}
-				return err
-			}
-			now := time.Now().UTC()
-			state := &store.MessageState{
-				MessageID: messageID,
-				AccountID: actor.ID,
-			}
-			patch(now, state)
-			if err := b.MessageStates.Upsert(r.Context(), state); err != nil {
-				return err
-			}
-			out = state
-			return recorder.RecordVia(r.Context(), b.Audit, actor.ID,
-				action, messageID, nil)
-		}); err != nil {
-			WriteError(w, err)
-			return
-		}
-		// Only the actor's own state changed; publish just them.
-		bus.Publish(out.AccountID)
-		WriteJSON(w, http.StatusOK, MessageStateToResponse(out))
 	}
 }

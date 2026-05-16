@@ -17,13 +17,15 @@ func (r *messageStateRepo) Upsert(ctx context.Context, s *store.MessageState) er
 	if s == nil {
 		return errcode.New(errcode.InvalidArgument, "message state is nil")
 	}
+	// M9 Phase 2: replied_at column gone. read_at is the only
+	// per-account state we track; COALESCE keeps the first read
+	// timestamp on idempotent re-upserts.
 	_, err := r.db.ExecContext(ctx, `
-INSERT INTO message_states(message_id, account_id, read_at, replied_at)
-VALUES (?, ?, ?, ?)
+INSERT INTO message_states(message_id, account_id, read_at)
+VALUES (?, ?, ?)
 ON CONFLICT(message_id, account_id) DO UPDATE
-   SET read_at    = COALESCE(message_states.read_at,    excluded.read_at),
-       replied_at = COALESCE(message_states.replied_at, excluded.replied_at)`,
-		s.MessageID, s.AccountID, nullableUnix(s.ReadAt), nullableUnix(s.RepliedAt),
+   SET read_at = COALESCE(message_states.read_at, excluded.read_at)`,
+		s.MessageID, s.AccountID, nullableUnix(s.ReadAt),
 	)
 	if err != nil {
 		return errcode.Wrap(err, errcode.Internal, "upsert message state")
@@ -33,15 +35,14 @@ ON CONFLICT(message_id, account_id) DO UPDATE
 
 func (r *messageStateRepo) Get(ctx context.Context, messageID, accountID string) (*store.MessageState, error) {
 	row := r.db.QueryRowContext(ctx, `
-SELECT message_id, account_id, read_at, replied_at
+SELECT message_id, account_id, read_at
   FROM message_states WHERE message_id = ? AND account_id = ?`,
 		messageID, accountID)
 	var (
-		s         store.MessageState
-		readAt    sql.NullInt64
-		repliedAt sql.NullInt64
+		s      store.MessageState
+		readAt sql.NullInt64
 	)
-	err := row.Scan(&s.MessageID, &s.AccountID, &readAt, &repliedAt)
+	err := row.Scan(&s.MessageID, &s.AccountID, &readAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errcode.New(errcode.NotFound, "message state not found")
 	}
@@ -49,7 +50,6 @@ SELECT message_id, account_id, read_at, replied_at
 		return nil, errcode.Wrap(err, errcode.Internal, "scan message state")
 	}
 	s.ReadAt = fromNullableUnix(readAt)
-	s.RepliedAt = fromNullableUnix(repliedAt)
 	return &s, nil
 }
 
@@ -119,25 +119,6 @@ SELECT COUNT(*)
 	return n, nil
 }
 
-func (r *messageStateRepo) CountPendingAcksForSubscribed(ctx context.Context, accountID string) (int, error) {
-	var n int
-	err := r.db.QueryRowContext(ctx, `
-SELECT COUNT(*)
-  FROM message_states ms
-  JOIN messages       m  ON m.id = ms.message_id
-  JOIN memberships    mb ON mb.account_id = ms.account_id AND mb.room_id = m.room_id
-  JOIN rooms          rm ON rm.id = m.room_id
- WHERE ms.account_id = ?
-   AND m.requires_ack = 1
-   AND ms.replied_at IS NULL
-   AND mb.subscribed = 1
-   AND rm.archived = 0`, accountID).Scan(&n)
-	if err != nil {
-		return 0, errcode.Wrap(err, errcode.Internal, "count pending acks for subscribed")
-	}
-	return n, nil
-}
-
 func (r *messageStateRepo) CountPriorityForSubscribed(ctx context.Context, accountID string) (int, error) {
 	var n int
 	err := r.db.QueryRowContext(ctx, `
@@ -198,8 +179,8 @@ func (r *messageStateRepo) ListMentionsForSubscribed(ctx context.Context, accoun
 	_ = botUserID
 	rows, err := r.db.QueryContext(ctx, `
 SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
-       m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash,
-       m.mention_all, m.mention_everyone
+       m.reply_to_msg_id, m.priority, m.created_at, m.content_hash,
+       m.mention_everyone
   FROM messages       m
   JOIN message_states ms ON ms.message_id = m.id
   JOIN memberships    mb ON mb.account_id = ms.account_id AND mb.room_id = m.room_id
@@ -224,40 +205,14 @@ SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
 	return drainMessageRows(rows)
 }
 
-func (r *messageStateRepo) ListPendingAcksForSubscribed(ctx context.Context, accountID string, limit int) ([]*store.Message, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
-	rows, err := r.db.QueryContext(ctx, `
-SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
-       m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash,
-       m.mention_all, m.mention_everyone
-  FROM messages       m
-  JOIN message_states ms ON ms.message_id = m.id
-  JOIN memberships    mb ON mb.account_id = ms.account_id AND mb.room_id = m.room_id
-  JOIN rooms          rm ON rm.id = m.room_id
- WHERE ms.account_id = ?
-   AND m.requires_ack = 1
-   AND ms.replied_at IS NULL
-   AND mb.subscribed = 1
-   AND rm.archived = 0
- ORDER BY m.created_at DESC, m.id DESC
- LIMIT ?`, accountID, limit)
-	if err != nil {
-		return nil, errcode.Wrap(err, errcode.Internal, "list pending acks for subscribed")
-	}
-	defer rows.Close()
-	return drainMessageRows(rows)
-}
-
 func (r *messageStateRepo) ListPriorityForSubscribed(ctx context.Context, accountID string, limit int) ([]*store.Message, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	rows, err := r.db.QueryContext(ctx, `
 SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
-       m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash,
-       m.mention_all, m.mention_everyone
+       m.reply_to_msg_id, m.priority, m.created_at, m.content_hash,
+       m.mention_everyone
   FROM messages       m
   JOIN message_states ms ON ms.message_id = m.id
   JOIN memberships    mb ON mb.account_id = ms.account_id AND mb.room_id = m.room_id
@@ -293,7 +248,7 @@ func drainMessageRows(rows *sql.Rows) ([]*store.Message, error) {
 
 func (r *messageStateRepo) ListByAccount(ctx context.Context, accountID string) ([]*store.MessageState, error) {
 	rows, err := r.db.QueryContext(ctx, `
-SELECT message_id, account_id, read_at, replied_at
+SELECT message_id, account_id, read_at
   FROM message_states WHERE account_id = ?`, accountID)
 	if err != nil {
 		return nil, errcode.Wrap(err, errcode.Internal, "list message states")
@@ -302,15 +257,13 @@ SELECT message_id, account_id, read_at, replied_at
 	var out []*store.MessageState
 	for rows.Next() {
 		var (
-			s         store.MessageState
-			readAt    sql.NullInt64
-			repliedAt sql.NullInt64
+			s      store.MessageState
+			readAt sql.NullInt64
 		)
-		if err := rows.Scan(&s.MessageID, &s.AccountID, &readAt, &repliedAt); err != nil {
+		if err := rows.Scan(&s.MessageID, &s.AccountID, &readAt); err != nil {
 			return nil, errcode.Wrap(err, errcode.Internal, "scan message state row")
 		}
 		s.ReadAt = fromNullableUnix(readAt)
-		s.RepliedAt = fromNullableUnix(repliedAt)
 		out = append(out, &s)
 	}
 	if err := rows.Err(); err != nil {

@@ -15,8 +15,7 @@ type messageRepo struct {
 }
 
 const messageSelectCols = `id, room_id, author_account_id, discord_msg_id, content,
-       reply_to_msg_id, requires_ack, priority, created_at, content_hash, mention_all,
-       mention_everyone`
+       reply_to_msg_id, priority, created_at, content_hash, mention_everyone`
 
 func (r *messageRepo) Create(ctx context.Context, m *store.Message) error {
 	if m == nil {
@@ -27,12 +26,12 @@ func (r *messageRepo) Create(ctx context.Context, m *store.Message) error {
 	}
 	_, err := r.db.ExecContext(ctx, `
 INSERT INTO messages(id, room_id, author_account_id, discord_msg_id, content,
-                     reply_to_msg_id, requires_ack, priority, created_at, content_hash,
-                     mention_all, mention_everyone)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                     reply_to_msg_id, priority, created_at, content_hash,
+                     mention_everyone)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ID, m.RoomID, nullableString(m.AuthorAccountID), m.DiscordMsgID, m.Content,
-		nullableString(m.ReplyToMsgID), boolToInt(m.RequiresAck), string(m.Priority),
-		m.CreatedAt.Unix(), m.ContentHash, boolToInt(m.MentionAll), boolToInt(m.MentionEveryone),
+		nullableString(m.ReplyToMsgID), string(m.Priority),
+		m.CreatedAt.Unix(), m.ContentHash, boolToInt(m.MentionEveryone),
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -53,13 +52,13 @@ func (r *messageRepo) CreateIgnoreConflict(ctx context.Context, m *store.Message
 	}
 	res, err := r.db.ExecContext(ctx, `
 INSERT INTO messages(id, room_id, author_account_id, discord_msg_id, content,
-                     reply_to_msg_id, requires_ack, priority, created_at, content_hash,
-                     mention_all, mention_everyone)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     reply_to_msg_id, priority, created_at, content_hash,
+                     mention_everyone)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(discord_msg_id) DO NOTHING`,
 		m.ID, m.RoomID, nullableString(m.AuthorAccountID), m.DiscordMsgID, m.Content,
-		nullableString(m.ReplyToMsgID), boolToInt(m.RequiresAck), string(m.Priority),
-		m.CreatedAt.Unix(), m.ContentHash, boolToInt(m.MentionAll), boolToInt(m.MentionEveryone),
+		nullableString(m.ReplyToMsgID), string(m.Priority),
+		m.CreatedAt.Unix(), m.ContentHash, boolToInt(m.MentionEveryone),
 	)
 	if err != nil {
 		return "", false, errcode.Wrap(err, errcode.Internal, "insert-or-ignore message")
@@ -168,8 +167,8 @@ func (r *messageRepo) LatestPerRoomForMember(ctx context.Context, accountID stri
 	rows, err := r.db.QueryContext(ctx, `
 WITH ranked AS (
   SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
-         m.reply_to_msg_id, m.requires_ack, m.priority, m.created_at, m.content_hash,
-         m.mention_all, m.mention_everyone,
+         m.reply_to_msg_id, m.priority, m.created_at, m.content_hash,
+         m.mention_everyone,
          ROW_NUMBER() OVER (PARTITION BY m.room_id ORDER BY m.created_at DESC, m.id DESC) AS rn
     FROM messages m
     JOIN memberships mb ON mb.room_id = m.room_id
@@ -178,8 +177,7 @@ WITH ranked AS (
      AND rm.archived = 0
 )
 SELECT id, room_id, author_account_id, discord_msg_id, content,
-       reply_to_msg_id, requires_ack, priority, created_at, content_hash, mention_all,
-       mention_everyone
+       reply_to_msg_id, priority, created_at, content_hash, mention_everyone
   FROM ranked
  WHERE rn = 1`, accountID)
 	if err != nil {
@@ -206,29 +204,24 @@ func (r *messageRepo) ApplySendMetadata(ctx context.Context, id string, m store.
 	if !m.Priority.Valid() {
 		return errcode.New(errcode.InvalidArgument, "invalid priority %q", m.Priority)
 	}
-	// M9 Phase 1 fix: mention_everyone is OR-merged rather than
-	// overwritten. The ingester may have already set mention_everyone=1
-	// from a gateway echo by the time ApplySendMetadata runs (or
-	// vice-versa). Letting send overwrite to 0 would silently drop the
-	// real Discord-confirmed @everyone flag; CASE-MAX gives a stable
-	// "true sticks" merge. mention_all keeps its overwrite semantics
-	// because it's the legacy flag scheduled for removal in M9 Phase 2.
+	// M9 Phase 2: send-owned columns shrank — requires_ack /
+	// mention_all are no longer written from this path. They remain
+	// in the schema until the Phase 2 schema migration drops them.
+	// mention_everyone is OR-merged (MAX) so the ingester's
+	// gateway-echo observation is never clobbered by a later
+	// send-side write of false.
 	res, err := r.db.ExecContext(ctx, `
 UPDATE messages
    SET author_account_id = ?,
        reply_to_msg_id   = ?,
-       requires_ack      = ?,
        priority          = ?,
        content_hash      = ?,
-       mention_all       = ?,
        mention_everyone  = MAX(mention_everyone, ?)
  WHERE id = ?`,
 		nullableString(m.AuthorAccountID),
 		nullableString(m.ReplyToMsgID),
-		boolToInt(m.RequiresAck),
 		string(m.Priority),
 		m.ContentHash,
-		boolToInt(m.MentionAll),
 		boolToInt(m.MentionEveryone),
 		id,
 	)
@@ -282,6 +275,82 @@ func (r *messageRepo) MergeMentionEveryone(ctx context.Context, id string, flag 
 	return nil
 }
 
+// ListUnreadForAccountInRoom returns messages in roomID where the
+// caller's per-account state row has read_at IS NULL. The join to
+// message_states is what restricts the visibility to rooms where the
+// account actually has an inbox (fan-out only writes states for
+// current members at send time; joining a room after the fact does NOT
+// retroactively create rows for older messages).
+func (r *messageRepo) ListUnreadForAccountInRoom(ctx context.Context, accountID, roomID string, limit int) ([]*store.Message, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	rows, err := r.db.QueryContext(ctx, `
+SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
+       m.reply_to_msg_id, m.priority, m.created_at, m.content_hash,
+       m.mention_everyone
+  FROM messages       m
+  JOIN message_states ms ON ms.message_id = m.id
+ WHERE m.room_id     = ?
+   AND ms.account_id = ?
+   AND ms.read_at IS NULL
+ ORDER BY m.created_at DESC, m.id DESC
+ LIMIT ?`, roomID, accountID, limit)
+	if err != nil {
+		return nil, errcode.Wrap(err, errcode.Internal, "list unread for account in room")
+	}
+	defer rows.Close()
+	var out []*store.Message
+	for rows.Next() {
+		m, err := scanMessageRow(rows)
+		if err != nil {
+			return nil, errcode.Wrap(err, errcode.Internal, "scan unread row")
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errcode.Wrap(err, errcode.Internal, "iterate unread rows")
+	}
+	return out, nil
+}
+
+// ListReadHistoryForAccountInRoom returns messages in roomID where
+// the caller's per-account state row has read_at IS NOT NULL,
+// newest-first up to limit. Used as the "context" block that the M9
+// read-room handler appends to the unread feed.
+func (r *messageRepo) ListReadHistoryForAccountInRoom(ctx context.Context, accountID, roomID string, limit int) ([]*store.Message, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 10
+	}
+	rows, err := r.db.QueryContext(ctx, `
+SELECT m.id, m.room_id, m.author_account_id, m.discord_msg_id, m.content,
+       m.reply_to_msg_id, m.priority, m.created_at, m.content_hash,
+       m.mention_everyone
+  FROM messages       m
+  JOIN message_states ms ON ms.message_id = m.id
+ WHERE m.room_id     = ?
+   AND ms.account_id = ?
+   AND ms.read_at IS NOT NULL
+ ORDER BY m.created_at DESC, m.id DESC
+ LIMIT ?`, roomID, accountID, limit)
+	if err != nil {
+		return nil, errcode.Wrap(err, errcode.Internal, "list read history for account in room")
+	}
+	defer rows.Close()
+	var out []*store.Message
+	for rows.Next() {
+		m, err := scanMessageRow(rows)
+		if err != nil {
+			return nil, errcode.Wrap(err, errcode.Internal, "scan read history row")
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errcode.Wrap(err, errcode.Internal, "iterate read history rows")
+	}
+	return out, nil
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -291,24 +360,19 @@ func scanMessageRow(row rowScanner) (*store.Message, error) {
 		m               store.Message
 		authorID        sql.NullString
 		replyToID       sql.NullString
-		requiresAck     int
 		priority        string
 		createdAt       int64
-		mentionAll      int
 		mentionEveryone int
 	)
 	err := row.Scan(&m.ID, &m.RoomID, &authorID, &m.DiscordMsgID, &m.Content,
-		&replyToID, &requiresAck, &priority, &createdAt, &m.ContentHash,
-		&mentionAll, &mentionEveryone)
+		&replyToID, &priority, &createdAt, &m.ContentHash, &mentionEveryone)
 	if err != nil {
 		return nil, err
 	}
 	m.AuthorAccountID = fromNullableString(authorID)
 	m.ReplyToMsgID = fromNullableString(replyToID)
-	m.RequiresAck = requiresAck != 0
 	m.Priority = store.MessagePriority(priority)
 	m.CreatedAt = time.Unix(createdAt, 0).UTC()
-	m.MentionAll = mentionAll != 0
 	m.MentionEveryone = mentionEveryone != 0
 	return &m, nil
 }

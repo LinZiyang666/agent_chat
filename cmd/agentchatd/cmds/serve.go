@@ -159,17 +159,18 @@ func runServe(ctx context.Context) error {
 	}
 
 	handler := api.NewRouter(api.Deps{
-		Log:         log,
-		Accounts:    accountSvc,
-		AccountRepo: bundle.Accounts,
-		TokenRepo:   bundle.Tokens,
-		Auth:        authMgr,
-		Audit:       auditRec,
-		Bundler:     db, // *sqlite.Store implements store.Bundler
-		Connector:   conn,
-		MasterKey:   masterKey,
-		Ingester:    ingester,
-		StateBus:    stateBus,
+		Log:            log,
+		Accounts:       accountSvc,
+		AccountRepo:    bundle.Accounts,
+		TokenRepo:      bundle.Tokens,
+		Auth:           authMgr,
+		Audit:          auditRec,
+		Bundler:        db, // *sqlite.Store implements store.Bundler
+		Connector:      conn,
+		MasterKey:      masterKey,
+		Ingester:       ingester,
+		StateBus:       stateBus,
+		IdentityProber: discord.NewProber(),
 	})
 
 	srv := &http.Server{

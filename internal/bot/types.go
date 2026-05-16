@@ -1,6 +1,9 @@
 package bot
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // ConnStatus is a high-level summary of a Provider's connection state.
 // Concrete implementations may have richer internal states; this enum
@@ -77,6 +80,37 @@ type UploadFile struct {
 	MIME     string
 }
 
+// IdentityProber is the bot-layer seam the daemon uses to check a
+// candidate bot token against the platform BEFORE persisting it (M9
+// Phase 2 set-discord verification). Implementations:
+//
+//   - internal/bot/discord.Prober: hits Discord REST GET /users/@me
+//     with `Bot <token>` to fetch the real username + snowflake.
+//   - internal/bot/mock.Prober:    derives identity from the hint
+//     (Username = hint.Username, UserID = "u-"+hint.Username) so the
+//     existing mock-driven test suite keeps passing.
+//
+// Both implementations are stateless and safe to call once per
+// set-discord request. The Discord one does NOT open a gateway
+// WebSocket — only the REST endpoint, so the call is light.
+type IdentityProber interface {
+	// Probe returns the platform identity that `token` resolves to.
+	// `hint` carries the agentchat account name (used by mocks to
+	// synthesize a deterministic identity); platform implementations
+	// may ignore it. An error from Probe is fatal to the calling
+	// request — the daemon should NOT persist a token it couldn't
+	// confirm. Wrap network/auth failures with errcode.Unavailable
+	// or AuthInvalid so the API layer can map them sensibly.
+	Probe(ctx context.Context, token string, hint Identity) (Identity, error)
+	// Rename changes the platform-side username of the bot the token
+	// owns to `newUsername`. Used by set-discord's `--force-rename`
+	// path when the configured account name and the bot's Discord
+	// username don't match. Implementations should map rate-limit
+	// failures to a recognisable error (Discord caps bot username
+	// changes at 2/h) so the caller can surface a retry hint.
+	Rename(ctx context.Context, token string, newUsername string) error
+}
+
 // SendOptions is the extensible bag of optional parameters for
 // SendMessage.
 type SendOptions struct {
@@ -84,7 +118,22 @@ type SendOptions struct {
 	// the given platform message ID.
 	ReplyToMessageID string
 	// Attachments are local files to upload. Discord caps each file
-	// at 25 MB; callers are responsible for the size check (the API
-	// layer maps the failure mode to `ATTACHMENT_TOO_LARGE`).
+	// at 10 MB on the free tier (see internal/api/v1/messages.go
+	// DiscordAttachmentLimit); callers are responsible for the size
+	// check, the API layer maps oversize to `ATTACHMENT_TOO_LARGE`.
 	Attachments []UploadFile
+	// MentionAllowedUserIDs is the deduplicated list of platform user
+	// IDs the daemon has authorized this message to ping (M9 Phase
+	// 2). The send-path handler builds this by calling
+	// bot.ParseMentions(content, members) against the room's current
+	// member set, so only members named via @<name> in the request
+	// end up here. The Discord adapter passes it straight to
+	// `discordgo.MessageAllowedMentions.Users` — anything in content
+	// that is NOT on this list (e.g. a stray @everyone literal) will
+	// be displayed but will not ping.
+	MentionAllowedUserIDs []string
+	// MentionAllowedEveryone is true when the daemon parser flagged
+	// the content as containing `@everyone` and authorized it. The
+	// Discord adapter maps this to AllowedMentionTypeEveryone.
+	MentionAllowedEveryone bool
 }

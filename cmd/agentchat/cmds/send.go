@@ -12,12 +12,10 @@ import (
 )
 
 var (
-	flagSendReplyTo     string
-	flagSendRequiresAck bool
-	flagSendPriority    string
-	flagSendFromFile    string
-	flagSendMentionAll  bool
-	flagSendAttach      []string
+	flagSendReplyTo  string
+	flagSendPriority string
+	flagSendFromFile string
+	flagSendAttach   []string
 )
 
 var sendCmd = &cobra.Command{
@@ -25,7 +23,10 @@ var sendCmd = &cobra.Command{
 	Short: "Send a message to a room.",
 	Long: `Send a message to a room (the caller's account must be a member and
 online). The text may be passed as the second positional argument, or
-read from stdin via "--file -".`,
+read from stdin via "--file -". @-mentions are written directly in
+content: "@<name>" is rewritten to a Discord <@id> ping if the name
+matches a current room member; "@everyone" pings the whole room
+(needs the bot's Mention Everyone permission on Discord).`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		roomID := args[0]
@@ -65,9 +66,7 @@ read from stdin via "--file -".`,
 		c := newClient()
 		m, err := c.SendMessage(cmd.Context(), roomID, content, client.SendMessageOptions{
 			ReplyToID:   flagSendReplyTo,
-			RequiresAck: flagSendRequiresAck,
 			Priority:    flagSendPriority,
-			MentionAll:  flagSendMentionAll,
 			Attachments: atts,
 		})
 		if err != nil {
@@ -84,14 +83,10 @@ read from stdin via "--file -".`,
 
 func init() {
 	sendCmd.Flags().StringVar(&flagSendReplyTo, "reply", "", "message id this is a reply to")
-	sendCmd.Flags().BoolVar(&flagSendRequiresAck, "requires-ack", false,
-		"flag the message as requiring a reply-ack from recipients")
 	sendCmd.Flags().StringVar(&flagSendPriority, "priority", "",
 		"priority band: normal | urgent | system (default normal)")
 	sendCmd.Flags().StringVar(&flagSendFromFile, "file", "",
 		"read message content from this file; use '-' for stdin")
-	sendCmd.Flags().BoolVar(&flagSendMentionAll, "all", false,
-		"M6 @all: every member of the room sees this in their mentions feed")
 	sendCmd.Flags().StringArrayVar(&flagSendAttach, "attach", nil,
 		"M7: attach a local file (repeatable; per-file ≤ 10 MB on free Discord servers, lowered from 25 MB in 2024-09)")
 	rootCmd.AddCommand(sendCmd)

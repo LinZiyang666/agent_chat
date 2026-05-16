@@ -74,17 +74,18 @@ func startM5TestDaemon(t *testing.T) (sock, token string, latest func() *mock.Pr
 	ing := message.New(conn, s, slog.New(slog.NewTextHandler(io.Discard, nil)), bus)
 
 	router := api.NewRouter(api.Deps{
-		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Accounts:    svc,
-		AccountRepo: bundle.Accounts,
-		TokenRepo:   bundle.Tokens,
-		Auth:        mgr,
-		Audit:       rec,
-		Bundler:     s,
-		Connector:   conn,
-		MasterKey:   key,
-		Ingester:    ing,
-		StateBus:    bus,
+		Log:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Accounts:       svc,
+		AccountRepo:    bundle.Accounts,
+		TokenRepo:      bundle.Tokens,
+		Auth:           mgr,
+		Audit:          rec,
+		Bundler:        s,
+		Connector:      conn,
+		MasterKey:      key,
+		Ingester:       ing,
+		StateBus:       bus,
+		IdentityProber: mock.NewProber(),
 	})
 	ln, err := net.Listen("unix", sock)
 	require.NoError(t, err)

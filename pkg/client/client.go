@@ -209,12 +209,29 @@ func (c *Client) RevokeToken(ctx context.Context, tokenID string) error {
 
 // ---- M3: Discord + lifecycle ----
 
+// SetDiscordOptions carries the optional knobs SetDiscord exposes. M9
+// Phase 2 added ForceRename: when true, a username mismatch between
+// the agentchat account and the Discord bot triggers a PATCH on the
+// bot's username instead of a CONFLICT response.
+type SetDiscordOptions struct {
+	ForceRename bool
+}
+
 // SetDiscord encrypts and stores a bot token on the given account.
-func (c *Client) SetDiscord(ctx context.Context, accountID, botToken string) (*apiv1.AccountResponse, error) {
+// The daemon verifies the token + username with Discord REST before
+// persisting; see internal/api/v1/discord.go::SetDiscord.
+func (c *Client) SetDiscord(ctx context.Context, accountID, botToken string, opts ...SetDiscordOptions) (*apiv1.AccountResponse, error) {
+	var o SetDiscordOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 	var out apiv1.AccountResponse
 	err := c.do(ctx, http.MethodPost,
 		fmt.Sprintf("/v1/accounts/%s/discord", accountID),
-		apiv1.SetDiscordRequest{BotToken: botToken}, &out)
+		apiv1.SetDiscordRequest{
+			BotToken:    botToken,
+			ForceRename: o.ForceRename,
+		}, &out)
 	if err != nil {
 		return nil, err
 	}
@@ -456,9 +473,7 @@ func (c *Client) SetSubscribed(ctx context.Context, roomID string, subscribed bo
 // SendMessageOptions wraps the optional bits of SendMessage.
 type SendMessageOptions struct {
 	ReplyToID   string
-	RequiresAck bool
 	Priority    string
-	MentionAll  bool
 	Attachments []SendAttachment
 }
 
@@ -475,11 +490,9 @@ type SendAttachment struct {
 func (c *Client) SendMessage(ctx context.Context, roomID, content string, opts SendMessageOptions) (*apiv1.MessageResponse, error) {
 	var out apiv1.MessageResponse
 	req := apiv1.SendMessageRequest{
-		Content:     content,
-		ReplyToID:   opts.ReplyToID,
-		RequiresAck: opts.RequiresAck,
-		Priority:    opts.Priority,
-		MentionAll:  opts.MentionAll,
+		Content:   content,
+		ReplyToID: opts.ReplyToID,
+		Priority:  opts.Priority,
 	}
 	if len(opts.Attachments) > 0 {
 		// Resolve relative paths to absolute on the client side so
@@ -569,40 +582,23 @@ func (c *Client) AckSystemAnnouncement(ctx context.Context, sysAnnID string) (*a
 	return &out, nil
 }
 
-// ListMessagesOptions narrows ListMessages results.
-type ListMessagesOptions struct {
+// ReadRoomOptions mirrors apiv1.ReadRoomRequest in the public package.
+// Both fields are optional: leaving Before empty selects the
+// mark-as-read mode, setting it switches to pure history paging.
+type ReadRoomOptions struct {
 	Before string
 	Limit  int
 }
 
-func (c *Client) ListMessages(ctx context.Context, roomID string, opts ListMessagesOptions) ([]apiv1.MessageResponse, error) {
-	q := ""
-	sep := "?"
-	if opts.Before != "" {
-		q += sep + "before=" + opts.Before
-		sep = "&"
+// ReadRoom hits POST /v1/rooms/{id}/read (M9 Phase 2). See the
+// handler / docs/06-cli-redesign.md §3 for the response shape.
+func (c *Client) ReadRoom(ctx context.Context, roomID string, opts ReadRoomOptions) (*apiv1.ReadRoomResponse, error) {
+	req := apiv1.ReadRoomRequest{
+		Before: opts.Before,
+		Limit:  opts.Limit,
 	}
-	if opts.Limit > 0 {
-		q += sep + "limit=" + fmt.Sprint(opts.Limit)
-	}
-	var out apiv1.MessageListResponse
-	if err := c.do(ctx, http.MethodGet, "/v1/rooms/"+roomID+"/messages"+q, nil, &out); err != nil {
-		return nil, err
-	}
-	return out.Messages, nil
-}
-
-func (c *Client) MarkMessageRead(ctx context.Context, messageID string) (*apiv1.MessageStateResponse, error) {
-	var out apiv1.MessageStateResponse
-	if err := c.do(ctx, http.MethodPost, "/v1/messages/"+messageID+"/read", nil, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (c *Client) ReplyAckMessage(ctx context.Context, messageID string) (*apiv1.MessageStateResponse, error) {
-	var out apiv1.MessageStateResponse
-	if err := c.do(ctx, http.MethodPost, "/v1/messages/"+messageID+"/reply-ack", nil, &out); err != nil {
+	var out apiv1.ReadRoomResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/rooms/"+roomID+"/read", req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

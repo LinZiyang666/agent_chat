@@ -102,9 +102,13 @@ func (f *fx) message(room string, content string, opts ...func(*store.Message)) 
 	return m
 }
 
-func (f *fx) state(msg, acc string, readAt, repliedAt *time.Time) {
+// state is a helper to seed a per-account read state. The
+// second-trailing pointer parameter is the M6-era replied_at slot;
+// M9 Phase 2 retired the column, so the parameter is now ignored and
+// only kept for the existing call-sites' signatures.
+func (f *fx) state(msg, acc string, readAt, _ *time.Time) {
 	require.NoError(f.t, f.store.Bundle().MessageStates.Upsert(context.Background(), &store.MessageState{
-		MessageID: msg, AccountID: acc, ReadAt: readAt, RepliedAt: repliedAt,
+		MessageID: msg, AccountID: acc, ReadAt: readAt,
 	}))
 }
 
@@ -128,7 +132,6 @@ func TestEmptySnapshotShape(t *testing.T) {
 	assert.Equal(t, 0, snap.Totals.Unread)
 	assert.Empty(t, snap.Rooms)
 	assert.Empty(t, snap.Mentions)
-	assert.Empty(t, snap.PendingAcks)
 	assert.Empty(t, snap.Priority)
 	assert.Empty(t, snap.NewRooms)
 	assert.Empty(t, snap.RecentlyActive)
@@ -231,35 +234,12 @@ func TestSnapshotPerUserMentionRequiresSubscribed(t *testing.T) {
 	assert.Equal(t, 0, snap.Totals.Mentions)
 }
 
-func TestSnapshotPendingAcks(t *testing.T) {
-	f := newFx(t)
-	viewer := f.account("viewer", "u-viewer")
-	r := f.room("r")
-	f.member(viewer.ID, r.ID, true)
-	ackable := f.message(r.ID, "please ack", func(m *store.Message) { m.RequiresAck = true })
-	normal := f.message(r.ID, "no ack needed")
-	read := time.Now().UTC()
-	// Read but not yet replied — still pending.
-	f.state(ackable.ID, viewer.ID, &read, nil)
-	f.state(normal.ID, viewer.ID, &read, nil)
-
-	snap := f.build(viewer.ID)
-	require.Len(t, snap.PendingAcks, 1)
-	assert.Equal(t, ackable.ID, snap.PendingAcks[0].MessageID)
-}
-
-func TestSnapshotPendingAcksClearsWhenReplied(t *testing.T) {
-	f := newFx(t)
-	viewer := f.account("viewer", "u-viewer")
-	r := f.room("r")
-	f.member(viewer.ID, r.ID, true)
-	m := f.message(r.ID, "ack", func(m *store.Message) { m.RequiresAck = true })
-	now := time.Now().UTC()
-	f.state(m.ID, viewer.ID, &now, &now)
-
-	snap := f.build(viewer.ID)
-	assert.Empty(t, snap.PendingAcks)
-}
+// M9 Phase 2: TestSnapshotPendingAcks /
+// TestSnapshotPendingAcksClearsWhenReplied removed when the
+// pending_acks dimension retired. The replacement signal for "you
+// need to deal with this" is @-mentions: mention an account, the
+// state.Mentions[] feed and Totals.Mentions counter pick it up. See
+// the M9 mention tests in this file.
 
 func TestSnapshotPriorityListsUrgentAndSystem(t *testing.T) {
 	f := newFx(t)
@@ -343,10 +323,10 @@ func TestPhase3ArchivedRoomsDoNotLeakIntoPrimaryState(t *testing.T) {
 	viewer := f.account("viewer", "u-viewer")
 	r := f.room("archived")
 	f.member(viewer.ID, r.ID, true)
-	m := f.message(r.ID, "urgent ack <@u-viewer>", func(m *store.Message) {
-		m.RequiresAck = true
+	m := f.message(r.ID, "urgent", func(m *store.Message) {
 		m.Priority = store.PriorityUrgent
 	})
+	f.mention(m.ID, viewer.ID)
 	f.state(m.ID, viewer.ID, nil, nil)
 
 	r.Archived = true
@@ -356,11 +336,9 @@ func TestPhase3ArchivedRoomsDoNotLeakIntoPrimaryState(t *testing.T) {
 	snap := f.build(viewer.ID)
 	assert.Equal(t, 0, snap.Totals.Unread)
 	assert.Equal(t, 0, snap.Totals.Mentions)
-	assert.Equal(t, 0, snap.Totals.PendingAcks)
 	assert.Equal(t, 0, snap.Totals.Priority)
 	assert.Empty(t, snap.Rooms)
 	assert.Empty(t, snap.Mentions)
-	assert.Empty(t, snap.PendingAcks)
 	assert.Empty(t, snap.Priority)
 	assert.Empty(t, snap.NewRooms)
 	assert.Empty(t, snap.RecentlyActive)
@@ -373,8 +351,7 @@ func TestPhase3TotalsAreNotCappedByFeedLimits(t *testing.T) {
 	f.member(viewer.ID, r.ID, true)
 
 	for i := 0; i < 55; i++ {
-		m := f.message(r.ID, "urgent please ack", func(m *store.Message) {
-			m.RequiresAck = true
+		m := f.message(r.ID, "urgent", func(m *store.Message) {
 			m.Priority = store.PriorityUrgent
 			m.CreatedAt = time.Now().Add(time.Duration(i) * time.Second).UTC()
 		})
@@ -384,10 +361,8 @@ func TestPhase3TotalsAreNotCappedByFeedLimits(t *testing.T) {
 
 	snap := f.build(viewer.ID)
 	assert.Len(t, snap.Mentions, 50, "feed is intentionally capped")
-	assert.Len(t, snap.PendingAcks, 50, "feed is intentionally capped")
 	assert.Len(t, snap.Priority, 50, "feed is intentionally capped")
 	assert.Equal(t, 55, snap.Totals.Mentions, "totals must count all matching rows, not only the visible feed")
-	assert.Equal(t, 55, snap.Totals.PendingAcks, "totals must count all matching rows, not only the visible feed")
 	assert.Equal(t, 55, snap.Totals.Priority, "totals must count all matching rows, not only the visible feed")
 }
 

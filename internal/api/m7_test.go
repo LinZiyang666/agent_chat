@@ -129,7 +129,10 @@ func TestSendMessageMixedOneOversizeAttachmentFails(t *testing.T) {
 	assert.Equal(t, string(errcode.AttachmentTooLarge), env1.Error.Code)
 }
 
-func TestListMessagesHydratesAttachments(t *testing.T) {
+// M9 Phase 2: GET /rooms/{id}/messages retired in favour of POST
+// /rooms/{id}/read; the attachment-hydration contract on the
+// returned MessageResponse is unchanged.
+func TestReadRoomHydratesAttachments(t *testing.T) {
 	env := newM5Env(t)
 	room := env.onlineAdminAndCreateRoom(t, "att-list")
 	p := writeTempFile(t, "report.md", []byte("# weekly report"))
@@ -143,17 +146,18 @@ func TestListMessagesHydratesAttachments(t *testing.T) {
 		}, env.adminToken)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 
-	resp, body = env.do(http.MethodGet, "/v1/rooms/"+room.ID+"/messages?limit=10", nil, env.adminToken)
+	resp, body = env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/read",
+		apiv1.ReadRoomRequest{Limit: 10}, env.adminToken)
 	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
-	var listResp apiv1.MessageListResponse
-	require.NoError(t, json.Unmarshal(body, &listResp))
-	require.NotEmpty(t, listResp.Messages)
+	var readResp apiv1.ReadRoomResponse
+	require.NoError(t, json.Unmarshal(body, &readResp))
+	require.NotEmpty(t, readResp.Messages)
 
 	// Find the message with our content and assert the attachment.
 	var found *apiv1.MessageResponse
-	for i := range listResp.Messages {
-		if listResp.Messages[i].Content == "see report" {
-			found = &listResp.Messages[i]
+	for i := range readResp.Messages {
+		if readResp.Messages[i].Content == "see report" {
+			found = &readResp.Messages[i]
 			break
 		}
 	}

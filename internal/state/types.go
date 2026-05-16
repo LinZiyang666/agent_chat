@@ -34,12 +34,10 @@ type Snapshot struct {
 	// 3. @-me messages the agent has not yet read.
 	Mentions []MessageEntry `json:"mentions"`
 
-	// 4. Messages the agent owes a reply on (requires_ack=true and
-	// the agent's own replied_at is still null).
-	PendingAcks []MessageEntry `json:"pending_acks"`
-
-	// 5. Priority feed: urgent + system messages the agent has not
-	// yet read.
+	// 4. Priority feed: urgent + system messages the agent has not
+	// yet read. (M9 Phase 2 retired the requires_ack / replied_at
+	// "PendingAcks" dimension — @-mentions now subsume that signal:
+	// being @-mentioned IS the "you need to deal with this" hint.)
 	Priority []MessageEntry `json:"priority"`
 
 	// 6. New rooms: rooms the agent has joined recently. M5 ships
@@ -72,10 +70,9 @@ type Snapshot struct {
 
 // Totals is the aggregate counter block (dimension 1).
 type Totals struct {
-	Unread      int `json:"unread"`
-	Mentions    int `json:"mentions"`
-	PendingAcks int `json:"pending_acks"`
-	Priority    int `json:"priority"`
+	Unread   int `json:"unread"`
+	Mentions int `json:"mentions"`
+	Priority int `json:"priority"`
 	// M6: unread announcement counts. Announcements is the count of
 	// rooms the agent is a member of whose latest announcement hasn't
 	// been ack'd yet. SystemAnnouncements is the count of system
@@ -119,7 +116,6 @@ type MessageEntry struct {
 	RoomName        string    `json:"room_name"`
 	AuthorAccountID string    `json:"author_account_id,omitempty"`
 	Priority        string    `json:"priority"`
-	RequiresAck     bool      `json:"requires_ack"`
 	Content         string    `json:"content"`
 	CreatedAt       time.Time `json:"created_at"`
 }

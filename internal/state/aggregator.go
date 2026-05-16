@@ -24,9 +24,8 @@ type Aggregator struct {
 	status ProviderStatusFn
 	now    func() time.Time
 
-	// Tunables (capped sizes for the three message lists).
+	// Tunables (capped sizes for the message lists).
 	mentionsLimit int
-	pendingLimit  int
 	priorityLimit int
 	newRoomsLimit int
 	recentLimit   int
@@ -50,7 +49,6 @@ func New(bundle store.Bundle, status ProviderStatusFn) *Aggregator {
 		status:                   status,
 		now:                      func() time.Time { return time.Now().UTC() },
 		mentionsLimit:            50,
-		pendingLimit:             50,
 		priorityLimit:            50,
 		newRoomsLimit:            5,
 		recentLimit:              20,
@@ -102,10 +100,6 @@ func (a *Aggregator) Build(ctx context.Context, accountID string, version int64)
 	if err != nil {
 		return nil, err
 	}
-	totalsPendingAcks, err := a.bundle.MessageStates.CountPendingAcksForSubscribed(ctx, accountID)
-	if err != nil {
-		return nil, err
-	}
 	totalsPriority, err := a.bundle.MessageStates.CountPriorityForSubscribed(ctx, accountID)
 	if err != nil {
 		return nil, err
@@ -135,12 +129,6 @@ func (a *Aggregator) Build(ctx context.Context, accountID string, version int64)
 	// truth for Totals).
 	mentions, err := a.listEntries(ctx, roomByID, func(c context.Context) ([]*store.Message, error) {
 		return a.bundle.MessageStates.ListMentionsForSubscribed(c, accountID, account.BotUserID, a.mentionsLimit)
-	})
-	if err != nil {
-		return nil, err
-	}
-	pendingAcks, err := a.listEntries(ctx, roomByID, func(c context.Context) ([]*store.Message, error) {
-		return a.bundle.MessageStates.ListPendingAcksForSubscribed(c, accountID, a.pendingLimit)
 	})
 	if err != nil {
 		return nil, err
@@ -221,14 +209,12 @@ func (a *Aggregator) Build(ctx context.Context, accountID string, version int64)
 		Totals: Totals{
 			Unread:              totalsUnread,
 			Mentions:            totalsMentions,
-			PendingAcks:         totalsPendingAcks,
 			Priority:            totalsPriority,
 			Announcements:       annTotal,
 			SystemAnnouncements: sysTotal,
 		},
 		Rooms:               rooms,
 		Mentions:            mentions,
-		PendingAcks:         pendingAcks,
 		Priority:            priority,
 		NewRooms:            newRooms,
 		RecentlyActive:      recent,
@@ -252,7 +238,6 @@ func (a *Aggregator) listEntries(ctx context.Context, roomByID map[string]*store
 			RoomID:          m.RoomID,
 			AuthorAccountID: m.AuthorAccountID,
 			Priority:        string(m.Priority),
-			RequiresAck:     m.RequiresAck,
 			Content:         m.Content,
 			CreatedAt:       m.CreatedAt,
 		}

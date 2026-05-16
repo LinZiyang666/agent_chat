@@ -38,6 +38,7 @@ type m4Env struct {
 	mu       sync.Mutex
 	created  []*mock.Provider
 	key      []byte
+	prober   *mock.Prober
 }
 
 func (m *m4Env) latest() *mock.Provider {
@@ -79,17 +80,19 @@ func newM4Env(t *testing.T) *m4Env {
 
 	env.ingester = message.New(env.conn, s, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
+	env.prober = mock.NewProber()
 	router := NewRouter(Deps{
-		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Accounts:    svc,
-		AccountRepo: bundle.Accounts,
-		TokenRepo:   bundle.Tokens,
-		Auth:        mgr,
-		Audit:       rec,
-		Bundler:     s,
-		Connector:   env.conn,
-		MasterKey:   key,
-		Ingester:    env.ingester,
+		Log:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Accounts:       svc,
+		AccountRepo:    bundle.Accounts,
+		TokenRepo:      bundle.Tokens,
+		Auth:           mgr,
+		Audit:          rec,
+		Bundler:        s,
+		Connector:      env.conn,
+		MasterKey:      key,
+		Ingester:       env.ingester,
+		IdentityProber: env.prober,
 	})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
@@ -258,9 +261,10 @@ func TestRoomSendMessagePersistsAndDedupesEcho(t *testing.T) {
 	// Give the ingester goroutine a moment.
 	time.Sleep(150 * time.Millisecond)
 
-	resp, body = env.do(http.MethodGet, "/v1/rooms/"+room.ID+"/messages", nil, env.adminToken)
+	resp, body = env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/read",
+		apiv1.ReadRoomRequest{Limit: 10}, env.adminToken)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	var list apiv1.MessageListResponse
+	var list apiv1.ReadRoomResponse
 	require.NoError(t, json.Unmarshal(body, &list))
 	// One message — the echo did NOT create a duplicate.
 	assert.Len(t, list.Messages, 1)
@@ -286,14 +290,26 @@ func TestIngesterIngestsExternalMessage(t *testing.T) {
 		CreatedAt: time.Now(),
 	})
 
+	// M9 Phase 2: GET /rooms/{id}/messages retired. Use ReadRoom to
+	// fetch the room view — the same persisted message is visible
+	// there. The admin is the author of nothing in this room and has
+	// no message_states row for the external message (fan-out only
+	// covered the room members), so the message lands in `messages`
+	// without going through marked_read.
 	require.Eventually(t, func() bool {
-		resp, body := env.do(http.MethodGet, "/v1/rooms/"+room.ID+"/messages", nil, env.adminToken)
+		resp, body := env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/read",
+			apiv1.ReadRoomRequest{Limit: 10}, env.adminToken)
 		if resp.StatusCode != http.StatusOK {
 			return false
 		}
-		var list apiv1.MessageListResponse
-		_ = json.Unmarshal(body, &list)
-		return len(list.Messages) == 1 && list.Messages[0].Content == "from outside"
+		var out apiv1.ReadRoomResponse
+		_ = json.Unmarshal(body, &out)
+		for _, m := range out.Messages {
+			if m.Content == "from outside" {
+				return true
+			}
+		}
+		return false
 	}, 10*time.Second, 100*time.Millisecond, "ingester should persist external message_new")
 }
 
@@ -347,7 +363,12 @@ func TestSendMessageRejectedForNonMember(t *testing.T) {
 	assert.Equal(t, string(errcode.PermDenied), env2.Error.Code)
 }
 
-func TestMarkReadAndReplyAck(t *testing.T) {
+// M9 Phase 2: TestMarkReadAndReplyAck (the M4-era explicit single-
+// message mark-read + reply-ack path) was removed when those two
+// endpoints retired. The replacement — "read a room flips its unread
+// rows to read in one shot" — is covered by
+// TestM9ReadRoomMarksUnreadOnce below.
+func TestM9ReadRoomMarksUnreadOnce(t *testing.T) {
 	env := newM4Env(t)
 	_, _ = env.do(http.MethodPost, "/v1/accounts/"+env.adminID+"/discord",
 		apiv1.SetDiscordRequest{BotToken: "f"}, env.adminToken)
@@ -363,24 +384,30 @@ func TestMarkReadAndReplyAck(t *testing.T) {
 	_, _ = env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/members",
 		apiv1.InviteRequest{AccountID: user.ID, Subscribed: true}, env.adminToken)
 
-	// admin sends a message; u2 (subscribed) should get a state row
-	// with read_at = nil.
-	resp, body = env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/messages",
-		apiv1.SendMessageRequest{Content: "ack me", RequiresAck: true}, env.adminToken)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var msg apiv1.MessageResponse
-	require.NoError(t, json.Unmarshal(body, &msg))
+	// admin sends two messages; u2 (subscribed) gets two unread
+	// states.
+	for _, body := range []string{"first", "second"} {
+		resp, _ := env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/messages",
+			apiv1.SendMessageRequest{Content: body}, env.adminToken)
+		require.Equal(t, http.StatusCreated, resp.StatusCode)
+	}
 
-	// u2 marks read.
-	resp, body = env.do(http.MethodPost, "/v1/messages/"+msg.ID+"/read", nil, utok)
+	// First ReadRoom returns the two unread messages on marked_read
+	// AND in the messages feed.
+	resp, body = env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/read",
+		apiv1.ReadRoomRequest{Limit: 10}, utok)
 	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
-	var st apiv1.MessageStateResponse
-	require.NoError(t, json.Unmarshal(body, &st))
-	require.NotNil(t, st.ReadAt)
+	var first apiv1.ReadRoomResponse
+	require.NoError(t, json.Unmarshal(body, &first))
+	require.Len(t, first.MarkedRead, 2, "both unread messages mark on first read")
 
-	// u2 acks reply.
-	resp, body = env.do(http.MethodPost, "/v1/messages/"+msg.ID+"/reply-ack", nil, utok)
+	// Second ReadRoom: nothing unread → marked_read empty, messages
+	// still shows them via the context band.
+	resp, body = env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/read",
+		apiv1.ReadRoomRequest{Limit: 10}, utok)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.NoError(t, json.Unmarshal(body, &st))
-	require.NotNil(t, st.RepliedAt)
+	var second apiv1.ReadRoomResponse
+	require.NoError(t, json.Unmarshal(body, &second))
+	require.Empty(t, second.MarkedRead)
+	require.Len(t, second.Messages, 2)
 }

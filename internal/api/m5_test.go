@@ -40,6 +40,7 @@ type m5Env struct {
 	mu       sync.Mutex
 	created  []*mock.Provider
 	key      []byte
+	prober   *mock.Prober
 }
 
 func (m *m5Env) latest() *mock.Provider {
@@ -86,18 +87,20 @@ func newM5Env(t *testing.T) *m5Env {
 
 	env.ingester = message.New(env.conn, s, slog.New(slog.NewTextHandler(io.Discard, nil)), env.bus)
 
+	env.prober = mock.NewProber()
 	router := NewRouter(Deps{
-		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Accounts:    svc,
-		AccountRepo: bundle.Accounts,
-		TokenRepo:   bundle.Tokens,
-		Auth:        mgr,
-		Audit:       rec,
-		Bundler:     s,
-		Connector:   env.conn,
-		MasterKey:   key,
-		Ingester:    env.ingester,
-		StateBus:    env.bus,
+		Log:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Accounts:       svc,
+		AccountRepo:    bundle.Accounts,
+		TokenRepo:      bundle.Tokens,
+		Auth:           mgr,
+		Audit:          rec,
+		Bundler:        s,
+		Connector:      env.conn,
+		MasterKey:      key,
+		Ingester:       env.ingester,
+		StateBus:       env.bus,
+		IdentityProber: env.prober,
 	})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)

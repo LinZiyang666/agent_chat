@@ -118,20 +118,33 @@ type MessageRepo interface {
 	// clobber a true the ingester already observed.
 	// Returns NotFound if id does not exist.
 	MergeMentionEveryone(ctx context.Context, id string, flag bool) error
+	// ListUnreadForAccountInRoom returns messages in roomID where the
+	// caller's message_states row has read_at IS NULL. Newest-first,
+	// capped at limit. Empty result if the account has no
+	// message_states rows in the room (e.g. they joined after every
+	// message; the fan-out only writes states for current members at
+	// send time). Used by the M9 Phase 2 read-room handler.
+	ListUnreadForAccountInRoom(ctx context.Context, accountID, roomID string, limit int) ([]*Message, error)
+	// ListReadHistoryForAccountInRoom returns messages in roomID
+	// where read_at IS NOT NULL, newest-first, capped at limit. The
+	// M9 Phase 2 read-room handler uses this to assemble the "last
+	// N context messages" block that follows the unread feed.
+	ListReadHistoryForAccountInRoom(ctx context.Context, accountID, roomID string, limit int) ([]*Message, error)
 }
 
 // SendMetadata is the set of agentchat-local fields the send path
-// owns on a message row. Used by MessageRepo.ApplySendMetadata.
+// owns on a message row. Used by MessageRepo.ApplySendMetadata. The
+// M6-era RequiresAck / MentionAll fields were dropped in M9 Phase 2
+// (the underlying columns linger until Phase 2's schema migration but
+// are no longer written from this path).
 type SendMetadata struct {
 	AuthorAccountID string
 	ReplyToMsgID    string
-	RequiresAck     bool
 	Priority        MessagePriority
 	ContentHash     string
-	MentionAll      bool
-	// MentionEveryone is the M9-side mirror of MentionAll. The send
-	// handler writes both during Phase 1 so the new state queries
-	// (which read mention_everyone) see legacy --all messages.
+	// MentionEveryone is the M9 source of truth for the @everyone
+	// flag on the row. ApplySendMetadata OR-merges it with whatever
+	// the ingester observed on the Discord echo.
 	MentionEveryone bool
 }
 
@@ -162,9 +175,6 @@ type MessageStateRepo interface {
 	// Totals.Mentions (the visible feed is capped via
 	// ListMentionsForSubscribed).
 	CountMentionsForSubscribed(ctx context.Context, accountID, botUserID string) (int, error)
-	// CountPendingAcksForSubscribed counts requires_ack messages
-	// in subscribed non-archived rooms whose replied_at IS NULL.
-	CountPendingAcksForSubscribed(ctx context.Context, accountID string) (int, error)
 	// CountPriorityForSubscribed counts unread urgent+system
 	// messages in subscribed non-archived rooms.
 	CountPriorityForSubscribed(ctx context.Context, accountID string) (int, error)
@@ -176,10 +186,6 @@ type MessageStateRepo interface {
 	// "<@botUserID>" mention token. Newest-first, capped at limit
 	// (default 50). Counters for Totals use CountMentionsForSubscribed.
 	ListMentionsForSubscribed(ctx context.Context, accountID, botUserID string, limit int) ([]*Message, error)
-	// ListPendingAcksForSubscribed returns messages in subscribed
-	// non-archived rooms with requires_ack=1 whose state.replied_at
-	// IS NULL. Newest-first, capped at limit.
-	ListPendingAcksForSubscribed(ctx context.Context, accountID string, limit int) ([]*Message, error)
 	// ListPriorityForSubscribed returns unread messages in subscribed
 	// non-archived rooms whose priority is 'urgent' or 'system'.
 	// Newest-first, capped at limit.

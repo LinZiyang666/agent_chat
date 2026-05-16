@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -21,6 +22,12 @@ import (
 // SetDiscordRequest is the body of POST /v1/accounts/{id}/discord.
 type SetDiscordRequest struct {
 	BotToken string `json:"bot_token"`
+	// ForceRename, when true, asks the daemon to rename the Discord
+	// bot user to the agentchat account.Name if the two don't match
+	// (M9 Phase 2). Without this flag, a mismatch returns CONFLICT.
+	// Discord enforces a per-bot username rate limit (2/h); the
+	// daemon surfaces UNAVAILABLE if the rename is rejected.
+	ForceRename bool `json:"force_rename,omitempty"`
 }
 
 // StatusResponse is the body of GET /v1/accounts/{id}/status.
@@ -42,7 +49,7 @@ type StatusResponse struct {
 // M8-Q-P1-010: dropped the unused `svc *account.Service` parameter.
 // The handler resolves the target account directly through the
 // transaction's b.Accounts repo, so the service handle was dead.
-func SetDiscord(bundler store.Bundler, recorder *audit.Recorder, masterKey []byte) http.HandlerFunc {
+func SetDiscord(bundler store.Bundler, recorder *audit.Recorder, masterKey []byte, prober bot.IdentityProber) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		var req SetDiscordRequest
@@ -54,11 +61,83 @@ func SetDiscord(bundler store.Bundler, recorder *audit.Recorder, masterKey []byt
 			WriteError(w, errcode.New(errcode.InvalidArgument, "bot_token is empty"))
 			return
 		}
+		// M9 Phase 2 design (docs/06-cli-redesign.md §6.2): the
+		// `force_rename` toggle is reachable via either the JSON
+		// body field OR a `?force_rename=true` query string. Accept
+		// both — body wins when both are set, but a true on either
+		// channel enables the rename branch.
+		if q := r.URL.Query().Get("force_rename"); q != "" {
+			if v, err := strconv.ParseBool(q); err != nil {
+				WriteError(w, errcode.New(errcode.InvalidArgument,
+					"force_rename must be a boolean (true|false|1|0); got %q", q))
+				return
+			} else if v {
+				req.ForceRename = true
+			}
+		}
 		actor, ok := auth.AccountFromContext(r.Context())
 		if !ok {
 			WriteError(w, errcode.New(errcode.Internal, "no actor in context"))
 			return
 		}
+
+		// Fetch the target account up-front (outside the write tx) so
+		// the prober knows what account.Name to match against. Failing
+		// here surfaces NotFound to the admin before we go bother
+		// Discord.
+		var accountName string
+		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {
+			a, err := b.Accounts.Get(r.Context(), id)
+			if err != nil {
+				return err
+			}
+			accountName = a.Name
+			return nil
+		}); err != nil {
+			WriteError(w, err)
+			return
+		}
+
+		// M9 Phase 2: probe the token against the platform BEFORE
+		// persisting. This pins down two invariants the outbound
+		// @<name> parser depends on:
+		//   1. account.Name == bot.Username (so `@alice` in content
+		//      reliably refers to the Discord-side identity alice).
+		//   2. accounts.bot_user_id is populated, so the ingester /
+		//      send path can map between snowflake and account_id
+		//      without an extra round-trip through OnlineAccount.
+		// If the daemon has no prober wired in (mock test rigs that
+		// haven't migrated yet), fall back to the legacy behaviour:
+		// just persist the encrypted token. Production deps always
+		// inject one — see cmd/agentchatd/cmds/serve.go.
+		var (
+			probed         bot.Identity
+			usingProber    = prober != nil
+			didForceRename bool
+		)
+		if usingProber {
+			id1, perr := prober.Probe(r.Context(), req.BotToken, bot.Identity{Username: accountName})
+			if perr != nil {
+				WriteError(w, perr)
+				return
+			}
+			probed = id1
+			if probed.Username != accountName {
+				if !req.ForceRename {
+					WriteError(w, errcode.New(errcode.Conflict,
+						"bot username %q does not match account name %q; rename the bot on the Discord developer portal or retry with force_rename=true",
+						probed.Username, accountName))
+					return
+				}
+				if rerr := prober.Rename(r.Context(), req.BotToken, accountName); rerr != nil {
+					WriteError(w, rerr)
+					return
+				}
+				didForceRename = true
+				probed.Username = accountName
+			}
+		}
+
 		enc, err := crypto.AESGCMEncrypt(masterKey, []byte(req.BotToken))
 		if err != nil {
 			WriteError(w, err)
@@ -72,12 +151,29 @@ func SetDiscord(bundler store.Bundler, recorder *audit.Recorder, masterKey []byt
 			}
 			a.BotTokenEnc = enc
 			a.UpdatedAt = time.Now().UTC()
+			// Persist the bot_user_id so the ingester's mention
+			// resolver and `room invite` don't have to wait for the
+			// first OnlineAccount call to learn it (M9 Phase 2).
+			if usingProber && probed.UserID != "" {
+				a.BotUserID = probed.UserID
+			}
 			if err := b.Accounts.Update(r.Context(), a); err != nil {
 				return err
 			}
 			updated = a
+			payload := map[string]any{}
+			if usingProber {
+				payload["bot_user_id"] = probed.UserID
+				payload["bot_username"] = probed.Username
+				if didForceRename {
+					payload["force_rename"] = true
+				}
+			}
+			if len(payload) == 0 {
+				payload = nil
+			}
 			return recorder.RecordVia(r.Context(), b.Audit, actor.ID,
-				audit.ActionAccountSetDiscord, id, nil)
+				audit.ActionAccountSetDiscord, id, payload)
 		}); err != nil {
 			WriteError(w, err)
 			return

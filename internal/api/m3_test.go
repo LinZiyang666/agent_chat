@@ -38,6 +38,7 @@ type m3Env struct {
 	mu      sync.Mutex
 	created []*mock.Provider
 	key     []byte
+	prober  *mock.Prober
 }
 
 func (m *m3Env) latest() *mock.Provider {
@@ -77,16 +78,18 @@ func newM3Env(t *testing.T) *m3Env {
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { env.conn.Shutdown(context.Background()) })
 
+	env.prober = mock.NewProber()
 	router := NewRouter(Deps{
-		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Accounts:    svc,
-		AccountRepo: bundle.Accounts,
-		TokenRepo:   bundle.Tokens,
-		Auth:        mgr,
-		Audit:       rec,
-		Bundler:     s,
-		Connector:   env.conn,
-		MasterKey:   key,
+		Log:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Accounts:       svc,
+		AccountRepo:    bundle.Accounts,
+		TokenRepo:      bundle.Tokens,
+		Auth:           mgr,
+		Audit:          rec,
+		Bundler:        s,
+		Connector:      env.conn,
+		MasterKey:      key,
+		IdentityProber: env.prober,
 	})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)

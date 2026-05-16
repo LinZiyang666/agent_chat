@@ -185,31 +185,33 @@ func TestSystemAnnouncementCreateForbiddenForNonAdmin(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
-func TestSendMessageWithMentionAllSurfacesInMentions(t *testing.T) {
+// M9 Phase 2: TestSendMessageWithMentionAllSurfacesInMentions replaced
+// the legacy `mention_all` flag with content `@everyone`. The outbound
+// parser sets messages.mention_everyone=1 when it sees the literal,
+// and the aggregator's mentions dimension counts mention_everyone rows
+// for every member regardless of subscription.
+func TestSendMessageEveryoneInContentSurfacesInMentions(t *testing.T) {
 	env := newM5Env(t)
 	room, _, viewerTok := roomWithViewer(t, env, "broadcast", "viewer3")
 
-	// Admin sends with mention_all=true. Note: the message content
-	// does NOT contain the viewer's literal <@bot_user_id>; only the
-	// mention_all flag should drive its inclusion in the mentions
-	// feed.
 	resp, body := env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/messages",
-		apiv1.SendMessageRequest{Content: "drill at 0600", MentionAll: true}, env.adminToken)
+		apiv1.SendMessageRequest{Content: "@everyone drill at 0600"}, env.adminToken)
 	require.Equal(t, http.StatusCreated, resp.StatusCode, string(body))
 	var msg apiv1.MessageResponse
 	require.NoError(t, json.Unmarshal(body, &msg))
-	assert.True(t, msg.MentionAll)
+	assert.True(t, msg.MentionEveryone)
 
 	resp, body = env.do(http.MethodGet, "/v1/state", nil, viewerTok)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var snap map[string]any
 	require.NoError(t, json.Unmarshal(body, &snap))
 	totals := snap["totals"].(map[string]any)
-	assert.EqualValues(t, 1, totals["mentions"], "mention_all forces every member into mentions feed")
+	assert.EqualValues(t, 1, totals["mentions"],
+		"@everyone in content forces every member into the mentions feed")
 	mentions, _ := snap["mentions"].([]any)
 	require.Len(t, mentions, 1)
 	m0 := mentions[0].(map[string]any)
-	assert.Equal(t, "drill at 0600", m0["content"])
+	assert.Equal(t, "@everyone drill at 0600", m0["content"])
 }
 
 // M6-S6 covered: ack is idempotent (read_at is overwritten on re-ack).

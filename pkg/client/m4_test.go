@@ -78,16 +78,17 @@ func startM4TestDaemon(t *testing.T) (sock, token string, latest func() *mock.Pr
 	ing := message.New(conn, s, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	router := api.NewRouter(api.Deps{
-		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Accounts:    svc,
-		AccountRepo: bundle.Accounts,
-		TokenRepo:   bundle.Tokens,
-		Auth:        mgr,
-		Audit:       rec,
-		Bundler:     s,
-		Connector:   conn,
-		MasterKey:   key,
-		Ingester:    ing,
+		Log:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Accounts:       svc,
+		AccountRepo:    bundle.Accounts,
+		TokenRepo:      bundle.Tokens,
+		Auth:           mgr,
+		Audit:          rec,
+		Bundler:        s,
+		Connector:      conn,
+		MasterKey:      key,
+		Ingester:       ing,
+		IdentityProber: mock.NewProber(),
 	})
 
 	ln, err := net.Listen("unix", sock)
@@ -232,7 +233,11 @@ func TestClientSetSubscribed(t *testing.T) {
 	assert.False(t, m.Subscribed)
 }
 
-func TestClientSendAndListMessages(t *testing.T) {
+// M9 Phase 2: TestClientSendAndListMessages was rewritten around the
+// new ReadRoom verb. The old List endpoint (GET /rooms/{id}/messages)
+// was retired; agents now use POST /rooms/{id}/read which both lists
+// and marks-as-read in one shot, with --before for pure-query paging.
+func TestClientSendAndReadRoom(t *testing.T) {
 	sock, tok, _ := startM4TestDaemon(t)
 	c := New(sock, tok)
 	bringRootOnline(t, c)
@@ -245,28 +250,40 @@ func TestClientSendAndListMessages(t *testing.T) {
 	assert.NotEmpty(t, sent.DiscordMsgID)
 
 	// Send with options.
-	withOpts, err := c.SendMessage(context.Background(), r.ID, "ack me", SendMessageOptions{
-		RequiresAck: true, Priority: "urgent",
+	withOpts, err := c.SendMessage(context.Background(), r.ID, "second", SendMessageOptions{
+		Priority: "urgent",
 	})
 	require.NoError(t, err)
-	assert.True(t, withOpts.RequiresAck)
 	assert.Equal(t, "urgent", withOpts.Priority)
 
-	msgs, err := c.ListMessages(context.Background(), r.ID, ListMessagesOptions{})
+	// The send path marks the author's own state as read, so root
+	// has no unread on this room. Read default mode therefore
+	// returns 0 marked_read but does surface both messages as
+	// context.
+	resp, err := c.ReadRoom(context.Background(), r.ID, ReadRoomOptions{})
 	require.NoError(t, err)
-	require.Len(t, msgs, 2)
-	assert.Equal(t, withOpts.ID, msgs[0].ID, "newest first")
+	require.NotNil(t, resp)
+	assert.Empty(t, resp.MarkedRead, "author already counts as read")
+	require.Len(t, resp.Messages, 2)
+	// ReadRoom returns oldest -> newest.
+	assert.Equal(t, sent.ID, resp.Messages[0].ID)
+	assert.Equal(t, withOpts.ID, resp.Messages[1].ID)
 
-	// Page: before = msgs[0].ID returns the older one.
-	page, err := c.ListMessages(context.Background(), r.ID, ListMessagesOptions{
-		Before: msgs[0].ID, Limit: 5,
+	// --before paginates without touching read state.
+	page, err := c.ReadRoom(context.Background(), r.ID, ReadRoomOptions{
+		Before: withOpts.ID, Limit: 5,
 	})
 	require.NoError(t, err)
-	require.Len(t, page, 1)
-	assert.Equal(t, sent.ID, page[0].ID)
+	require.Len(t, page.Messages, 1)
+	assert.Equal(t, sent.ID, page.Messages[0].ID)
+	assert.Empty(t, page.MarkedRead, "--before mode must NOT mark anything")
 }
 
-func TestClientMarkReadAndReplyAck(t *testing.T) {
+// M9 Phase 2 supersedes the M4-era TestClientMarkReadAndReplyAck:
+// MarkMessageRead and ReplyAckMessage are gone. The replacement
+// coverage — "an agent reads a room and unread rows flip to read" —
+// lives in TestM9ReadRoomMarksUnreadOnce in internal/api.
+func TestClientReadRoomMarksUnread(t *testing.T) {
 	sock, tok, _ := startM4TestDaemon(t)
 	admin := New(sock, tok)
 	bringRootOnline(t, admin)
@@ -283,20 +300,23 @@ func TestClientMarkReadAndReplyAck(t *testing.T) {
 	require.NoError(t, err)
 
 	msg, err := admin.SendMessage(context.Background(), r.ID, "answer me",
-		SendMessageOptions{RequiresAck: true})
+		SendMessageOptions{})
 	require.NoError(t, err)
 
 	rawTok, err := admin.CreateToken(context.Background(), target.ID)
 	require.NoError(t, err)
 	user := New(sock, rawTok.Raw)
 
-	st, err := user.MarkMessageRead(context.Background(), msg.ID)
+	// First read: the message is unread for the user -> ends up in
+	// marked_read.
+	resp, err := user.ReadRoom(context.Background(), r.ID, ReadRoomOptions{})
 	require.NoError(t, err)
-	require.NotNil(t, st.ReadAt)
+	require.Contains(t, resp.MarkedRead, msg.ID)
 
-	st, err = user.ReplyAckMessage(context.Background(), msg.ID)
+	// Second read: already read, so marked_read is empty.
+	again, err := user.ReadRoom(context.Background(), r.ID, ReadRoomOptions{})
 	require.NoError(t, err)
-	require.NotNil(t, st.RepliedAt)
+	assert.Empty(t, again.MarkedRead)
 }
 
 func TestClientDeleteRoom(t *testing.T) {

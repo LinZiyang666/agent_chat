@@ -123,13 +123,15 @@ func TestPhase3SendRacePreservesLocalMetadata(t *testing.T) {
 	// that the mock provider will return on the next SendMessage call.
 	// The ingester only knows Discord-native fields, so the send path
 	// must still persist agentchat-local metadata from the request.
+	// M9 Phase 2 retired requires_ack from the send path, so this
+	// test now asserts the surviving send-owned columns: priority
+	// (and, implicitly, content_hash + reply_to_msg_id).
 	preexisting := &store.Message{
 		ID:              "race-existing-message",
 		RoomID:          room.ID,
 		AuthorAccountID: env.adminID,
 		DiscordMsgID:    "msg-1",
 		Content:         "needs metadata",
-		RequiresAck:     false,
 		Priority:        store.PriorityNormal,
 		CreatedAt:       time.Now().UTC(),
 		ContentHash:     "hash-from-ingester",
@@ -138,20 +140,18 @@ func TestPhase3SendRacePreservesLocalMetadata(t *testing.T) {
 
 	resp, body := env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/messages",
 		apiv1.SendMessageRequest{
-			Content:     "needs metadata",
-			RequiresAck: true,
-			Priority:    string(store.PriorityUrgent),
+			Content:  "needs metadata",
+			Priority: string(store.PriorityUrgent),
 		}, env.adminToken)
 	require.Equal(t, http.StatusCreated, resp.StatusCode, string(body))
 
 	var msg apiv1.MessageResponse
 	require.NoError(t, json.Unmarshal(body, &msg))
 	assert.Equal(t, preexisting.ID, msg.ID)
-	assert.True(t, msg.RequiresAck, "send-path metadata must survive the ingest-wins race")
-	assert.Equal(t, string(store.PriorityUrgent), msg.Priority)
+	assert.Equal(t, string(store.PriorityUrgent), msg.Priority,
+		"send-path priority must survive the ingest-wins race")
 
 	stored, err := env.store.Bundle().Messages.Get(context.Background(), preexisting.ID)
 	require.NoError(t, err)
-	assert.True(t, stored.RequiresAck)
 	assert.Equal(t, store.PriorityUrgent, stored.Priority)
 }

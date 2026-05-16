@@ -16,12 +16,14 @@ func TestPhase3MentionAllReachesUnsubscribedCurrentMember(t *testing.T) {
 	viewer, viewerToken := phase3OnlineAccountWithToken(t, env, "observer")
 	phase3Invite(t, env, room.ID, viewer.ID, false)
 
+	// M9 Phase 2: legacy MentionAll flag retired. The replacement is
+	// the @everyone literal in content — the outbound parser flags it
+	// and the aggregator counts mention_everyone for every member.
 	var resp *http.Response
 	var body []byte
 	var sent apiv1.MessageResponse
 	resp, body = env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/messages", apiv1.SendMessageRequest{
-		Content:    "standup now",
-		MentionAll: true,
+		Content: "@everyone standup now",
 	}, env.adminToken)
 	require.Equal(t, http.StatusCreated, resp.StatusCode, string(body))
 	require.NoError(t, json.Unmarshal(body, &sent))
@@ -42,36 +44,30 @@ func TestPhase3MentionAllReachesUnsubscribedCurrentMember(t *testing.T) {
 	}
 }
 
-func TestPhase3BotIDMentionDoesNotReachUnsubscribedMember(t *testing.T) {
+// M9 Phase 2: raw <@id> in outbound content is rejected by the
+// parser. The M6-era TestPhase3BotIDMentionDoesNotReachUnsubscribedMember
+// asserted the inverse ("if you do write <@id>, only subscribed
+// members get the mention") — that whole branch is gone, so the test
+// becomes a stricter "send is rejected outright" check.
+func TestPhase3RawBotIDMentionRejected(t *testing.T) {
 	env := newM5Env(t)
 	room := env.onlineAdminAndCreateRoom(t, "phase3-bot-mention")
-	viewer, viewerToken := phase3OnlineAccountWithToken(t, env, "botobserver")
+	viewer, _ := phase3OnlineAccountWithToken(t, env, "botobserver")
 	phase3Invite(t, env, room.ID, viewer.ID, false)
 
 	resp, body := env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/messages", apiv1.SendMessageRequest{
 		Content: "hello <@u-botobserver>",
 	}, env.adminToken)
-	require.Equal(t, http.StatusCreated, resp.StatusCode, string(body))
-
-	resp, body = env.do(http.MethodGet, "/v1/state", nil, viewerToken)
-	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
-	var snap map[string]any
-	require.NoError(t, json.Unmarshal(body, &snap))
-
-	totals := snap["totals"].(map[string]any)
-	mentions, _ := snap["mentions"].([]any)
-	if totals["mentions"] != float64(0) || len(mentions) != 0 {
-		t.Fatalf("plain <@bot> mention should stay subscribed-only; totals=%v len=%d", totals["mentions"], len(mentions))
-	}
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, string(body))
 }
 
 func TestPhase3MentionAllDoesNotReachFutureMember(t *testing.T) {
 	env := newM5Env(t)
 	room := env.onlineAdminAndCreateRoom(t, "phase3-future-all")
 
+	// M9 Phase 2: @everyone in content replaces the M6 MentionAll flag.
 	resp, body := env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/messages", apiv1.SendMessageRequest{
-		Content:    "before you joined",
-		MentionAll: true,
+		Content: "@everyone before you joined",
 	}, env.adminToken)
 	require.Equal(t, http.StatusCreated, resp.StatusCode, string(body))
 

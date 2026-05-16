@@ -150,34 +150,23 @@ type Message struct {
 	DiscordMsgID    string
 	Content         string
 	ReplyToMsgID    string
-	RequiresAck     bool
 	Priority        MessagePriority
 	CreatedAt       time.Time
 	ContentHash     string
-	// MentionAll is the @all flag (M6). When true, every member of the
-	// message's room counts the message in their mentions feed, in
-	// addition to literal "<@bot_user_id>" matches.
-	//
-	// Deprecated (M9 Phase 1): superseded by MentionEveryone +
-	// message_mentions table. Still written by the M6 send path
-	// (--all) for backward compatibility through the cutover; will
-	// be removed in M9 Phase 2.
-	MentionAll bool
 	// MentionEveryone mirrors Discord's MESSAGE_CREATE.mention_everyone
-	// (M9). Replaces MentionAll going forward. State queries read this
-	// column; ingestion path sets it from the bot event, send path
-	// sets it true when the legacy --all flag is on.
+	// (M9). Read by the state aggregator's mentions dimension; written
+	// by the ingester (Discord-side flag) and the send-path outbound
+	// parser (@everyone in content).
 	MentionEveryone bool
 }
 
-// MessageState is one per-account read/reply state row. Both
-// timestamps are nil until the account performs the corresponding
-// action.
+// MessageState is one per-account read state row. ReadAt is nil until
+// the account reads the message; the M6-era RepliedAt timestamp was
+// retired in M9 Phase 2 alongside requires_ack / pending_acks.
 type MessageState struct {
 	MessageID string
 	AccountID string
 	ReadAt    *time.Time
-	RepliedAt *time.Time
 }
 
 // MessageFilter narrows MessageRepo.List results.

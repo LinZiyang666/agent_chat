@@ -121,8 +121,8 @@ func renderStateHuman(w io.Writer, raw any) {
 	fmt.Fprintf(w, "Account: %v\n", s["account_id"])
 	fmt.Fprintf(w, "Version: %v   EmittedAt: %v\n", s["version"], s["emitted_at"])
 	if t, ok := s["totals"].(map[string]any); ok {
-		fmt.Fprintf(w, "Totals:  unread=%v  mentions=%v  pending=%v  priority=%v\n",
-			t["unread"], t["mentions"], t["pending_acks"], t["priority"])
+		fmt.Fprintf(w, "Totals:  unread=%v  mentions=%v  priority=%v\n",
+			t["unread"], t["mentions"], t["priority"])
 	}
 	if h, ok := s["health"].(map[string]any); ok {
 		fmt.Fprintf(w, "Health:  provider=%v  discord_reachable=%v\n",
@@ -137,7 +137,6 @@ func renderStateHuman(w io.Writer, raw any) {
 		}
 	}
 	renderList(w, "Mentions", s["mentions"])
-	renderList(w, "PendingAcks", s["pending_acks"])
 	renderList(w, "Priority", s["priority"])
 
 	if newRooms, _ := s["new_rooms"].([]any); len(newRooms) > 0 {
