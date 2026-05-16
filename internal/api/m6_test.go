@@ -248,16 +248,15 @@ func TestGetAnnouncementNotFoundForEmptyRoom(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, string(body))
 }
 
-// Ack with an unknown announcement id collapses to PERM_DENIED so a
-// caller can't enumerate ids via response status (M8-S-P2-009 fix).
-// The test was named *Returns404 historically because that was the
-// pre-fix behaviour — we keep the test name to make the migration
-// easy to find via git blame, but the assertion now matches the
-// hardened behaviour.
+// Ack with an unknown announcement id returns NOT_FOUND. Earlier
+// (M8-S-P2-009) the handler collapsed this to PERM_DENIED to prevent
+// id enumeration; since announcement IDs are uuidv7 (128 bits) the
+// enumeration risk is not realistic and the documented error matrix
+// uses NOT_FOUND for missing IDs.
 func TestAckAnnouncementUnknownIDReturns404(t *testing.T) {
 	env := newM5Env(t)
 	resp, body := env.do(http.MethodPost, "/v1/announcements/019e0000-0000-0000-0000-000000000000/read", nil, env.adminToken)
-	assert.Equal(t, http.StatusForbidden, resp.StatusCode, string(body))
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, string(body))
 }
 
 // M9 Phase 1: the M6-era TestMentionByBotIDStillSubscribedOnly

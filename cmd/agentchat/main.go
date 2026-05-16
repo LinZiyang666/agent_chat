@@ -10,5 +10,5 @@ import (
 )
 
 func main() {
-	cliutil.PrintAndExit(cmds.Execute())
+	cliutil.PrintAndExitMode(cmds.Execute(), cmds.JSONMode())
 }

@@ -139,15 +139,13 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 				return err
 			}
 			if a.Role != store.RoleAdmin {
-				// M8-S-P2-012: priority=system is operator/announcement
-				// territory. Non-admin callers cannot impersonate
-				// system traffic. Fail before the membership probe so
-				// the response code reflects the actual policy
-				// violation rather than masking it behind "not a
-				// member" — and so the membership read is skipped on
-				// disallowed inputs.
+				// Non-admin callers may not impersonate system
+				// traffic. The check is on the argument shape (an
+				// admin-only value of the priority enum), so it is
+				// reported as INVALID_ARGUMENT to match the documented
+				// error-code matrix in USAGE.
 				if priority == store.PrioritySystem {
-					return errcode.New(errcode.PermDenied,
+					return errcode.New(errcode.InvalidArgument,
 						"priority=system requires admin role")
 				}
 				if _, err := b.Memberships.Get(r.Context(), actor.ID, roomID); err != nil {
@@ -416,13 +414,26 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 			// — Discord assigns a CDN URL after upload completes, so
 			// downstream consumers can re-fetch via the URL if the
 			// local file is removed.
+			//
+			// Race with ingester: if the gateway echo landed before
+			// this send tx (inserted=false), the ingester already
+			// inserted one attachment row per Discord attachment with
+			// LocalPath empty. Creating a second row here would yield
+			// the "two rows per file" bug seen in M9 audit (read
+			// returns both a discord-only entry and a local-only
+			// entry). Detect that case and patch the existing rows
+			// via MarkDownloaded instead.
 			if len(uploads) > 0 {
 				nowAtt := time.Now().UTC()
-				for i, u := range uploads {
-					attID, idErr := uuid.NewV7()
-					if idErr != nil {
-						return errcode.Wrap(idErr, errcode.Internal, "uuidv7 for attachment")
+				var existing []*store.Attachment
+				if !inserted {
+					ex, err := b.Attachments.ListByMessage(r.Context(), effectiveID)
+					if err != nil {
+						return err
 					}
+					existing = ex
+				}
+				for i, u := range uploads {
 					var (
 						discordURL string
 						sentName   string
@@ -434,6 +445,21 @@ func SendMessage(conn *connector.Connector, bundler store.Bundler, recorder *aud
 					fname := u.FileName
 					if sentName != "" {
 						fname = sentName
+					}
+					if i < len(existing) {
+						// Patch ingester's placeholder row with the
+						// local path / downloaded_at the send path
+						// owns. sha256 is left empty; outbound
+						// dedupe by hash is not required.
+						if err := b.Attachments.MarkDownloaded(
+							r.Context(), existing[i].ID, u.Path, "", nowAtt); err != nil {
+							return err
+						}
+						continue
+					}
+					attID, idErr := uuid.NewV7()
+					if idErr != nil {
+						return errcode.Wrap(idErr, errcode.Internal, "uuidv7 for attachment")
 					}
 					row := &store.Attachment{
 						ID:           attID.String(),
@@ -631,8 +657,8 @@ func ReadRoom(bundler store.Bundler, recorder *audit.Recorder, bus *state.Bus) h
 			rr, err := b.Rooms.Get(r.Context(), roomID)
 			if err != nil {
 				if ec, _ := errcode.As(err); ec != nil && ec.Code == errcode.NotFound {
-					return errcode.New(errcode.PermDenied,
-						"actor %s cannot access room %s", actor.ID, roomID)
+					return errcode.New(errcode.NotFound,
+						"room %s not found", roomID)
 				}
 				return err
 			}

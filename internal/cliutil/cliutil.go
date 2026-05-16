@@ -4,6 +4,7 @@
 package cliutil
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -49,14 +50,65 @@ func PrintError(w io.Writer, err error) {
 	fmt.Fprintf(w, "Error: %v\n", err)
 }
 
+// PrintErrorJSON writes err to w as a structured JSON line on a
+// single line (NDJSON-friendly):
+//
+//	{"error":{"code":"NOT_FOUND","message":"...","details":{...}}}
+//
+// Errors lacking an errcode.Error (cobra arg/flag failures, local
+// runtime errors) are emitted with code:"" so agents can still
+// branch off the presence/absence of error.code without losing the
+// message.
+func PrintErrorJSON(w io.Writer, err error) {
+	if err == nil {
+		return
+	}
+	body := map[string]any{}
+	if e, ok := errcode.As(err); ok {
+		body["code"] = string(e.Code)
+		body["message"] = e.Message
+		if len(e.Details) > 0 {
+			body["details"] = e.Details
+		}
+		if cause := errors.Unwrap(e); cause != nil {
+			body["cause"] = cause.Error()
+		}
+	} else {
+		body["code"] = ""
+		body["message"] = err.Error()
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": body})
+}
+
 // PrintAndExit calls PrintError on os.Stderr and exits with the code
 // mapped by errcode.ExitCode. Designed to be the only os.Exit call in
 // each binary's main().
+//
+// Errors that do not carry an errcode.Error are produced by cobra's
+// own argument / flag validators (e.g. "unknown flag: --foo",
+// "accepts between 1 and 2 arg(s), received 0"). The USAGE matrix
+// reserves exit code 2 for CLI-side argument issues, matching the
+// cobra convention; daemon-sourced errors always carry an errcode
+// and route through ExitCode().
 func PrintAndExit(err error) {
+	PrintAndExitMode(err, false)
+}
+
+// PrintAndExitMode is the JSON-aware variant of PrintAndExit. When
+// jsonMode is true and err is non-nil, the error is serialized as
+// {"error":{...}} on stderr instead of the "Error [CODE]: ..." line.
+func PrintAndExitMode(err error, jsonMode bool) {
 	if err == nil {
 		os.Exit(0)
 	}
-	PrintError(os.Stderr, err)
+	if jsonMode {
+		PrintErrorJSON(os.Stderr, err)
+	} else {
+		PrintError(os.Stderr, err)
+	}
+	if _, ok := errcode.As(err); !ok {
+		os.Exit(2)
+	}
 	os.Exit(errcode.ExitCode(err))
 }
 

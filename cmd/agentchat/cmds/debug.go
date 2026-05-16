@@ -53,7 +53,13 @@ var debugEventsCmd = &cobra.Command{
 	Short: "Stream live events from an account's Provider (NDJSON).",
 	Long: `Stream events as NDJSON: one JSON object per line, no
 heartbeat, the stream ends when the daemon-side Provider disconnects
-or this command is interrupted (Ctrl-C).`,
+or this command is interrupted (Ctrl-C).
+
+Note: Discord's gateway does not echo a bot's own outbound messages
+back to itself, so '--account X' will NOT see message_new events for
+messages sent BY account X. Trigger from a different account (another
+bot in the same guild, or a human in the Discord client) to see
+message_new frames here.`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		c := newClient()
 		evCh, err := c.StreamEvents(cmd.Context(), flagDebugEventsAccount)

@@ -69,6 +69,13 @@ func Execute() error {
 	return rootCmd.Execute()
 }
 
+// JSONMode reports whether --json was set on the command line after
+// flag parsing. main() consults this to decide between human-readable
+// and structured error output on the exit path. When cobra fails
+// before flag parsing completes (unknown flag, missing args), this
+// returns false and the error is rendered as plain text.
+func JSONMode() bool { return flagJSON }
+
 // resolveToken returns the bearer token to use. Precedence:
 //
 //  1. --token <s>

@@ -61,3 +61,6 @@ trace.out
 .env
 .env.*
 !.env.example
+
+# Local-only secrets dump (Discord bot tokens + agentchat API tokens, plaintext)
+/.tokens.local

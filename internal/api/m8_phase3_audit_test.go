@@ -66,16 +66,16 @@ func TestPhase3M8PriorityForbidsSystemForUser(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body, &tk))
 	require.NotEmpty(t, tk.Raw)
 
-	// User attempts priority=system. Per M8-S-P2-012 the check fires
-	// before the membership probe so we don't need to invite the
-	// user into the room — the priority gate is the policy contract,
-	// not the membership state.
+	// User attempts priority=system. The priority gate is treated as
+	// an argument-shape violation: the "system" value of the priority
+	// enum is admin-only, so non-admin callers get INVALID_ARGUMENT
+	// (matches the USAGE error-code matrix; exit code 22).
 	resp, body = env.do(http.MethodPost, "/v1/rooms/"+room.ID+"/messages",
 		apiv1.SendMessageRequest{Content: "pretend system", Priority: "system"}, tk.Raw)
-	require.Equal(t, http.StatusForbidden, resp.StatusCode, string(body))
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, string(body))
 	var env1 apiv1.ErrorEnvelope
 	require.NoError(t, json.Unmarshal(body, &env1))
-	assert.Equal(t, string(errcode.PermDenied), env1.Error.Code)
+	assert.Equal(t, string(errcode.InvalidArgument), env1.Error.Code)
 }
 
 // M8-S-P1-001 regression already lives in TestDecodeJSONRejectsOversizeBody;

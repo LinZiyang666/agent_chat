@@ -19,15 +19,24 @@ const dataRootLockName = "agentchatd.lock"
 // the *os.File releases the underlying flock automatically (POSIX
 // drops file locks when the FD is closed or the process exits).
 type dataRootLock struct {
-	f *os.File
+	f    *os.File
+	path string
 }
 
-// Release closes the lock file, dropping the lock.
+// Release closes the lock file, dropping the flock, and removes the
+// lock file from disk so the next start does not see a stale PID.
+// flock would survive process exit only via the kernel-level inode
+// lock; the file *content* (our PID line) sticks around and confuses
+// operators who follow USAGE-ADMIN §13's "cat agentchatd.lock" hint.
 func (l *dataRootLock) Release() {
 	if l == nil || l.f == nil {
 		return
 	}
+	path := l.path
 	_ = l.f.Close()
+	if path != "" {
+		_ = os.Remove(path)
+	}
 }
 
 // acquireDataRootLock takes an exclusive non-blocking flock on
@@ -56,5 +65,5 @@ func acquireDataRootLock(path string) (*dataRootLock, error) {
 		_, _ = f.Seek(0, 0)
 		_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
 	}
-	return &dataRootLock{f: f}, nil
+	return &dataRootLock{f: f, path: path}, nil
 }

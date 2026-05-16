@@ -227,12 +227,14 @@ func MarkAnnouncementRead(bundler store.Bundler, recorder *audit.Recorder, bus *
 		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {
 			ann, err := b.Announcements.Get(r.Context(), annID)
 			if err != nil {
-				// M8-S-P2-009: collapse NotFound into PermDenied so
-				// the read-state mutation can't be used to enumerate
-				// announcement ids.
+				// Surface NOT_FOUND for missing IDs to match the
+				// documented error-code matrix. Announcement IDs are
+				// uuidv7 (128 bits) so enumeration is not a realistic
+				// threat; downstream membership check still gates
+				// access to existing-but-foreign announcements.
 				if ec, _ := errcode.As(err); ec != nil && ec.Code == errcode.NotFound {
-					return errcode.New(errcode.PermDenied,
-						"actor %s cannot access announcement %s", actor.ID, annID)
+					return errcode.New(errcode.NotFound,
+						"announcement %s not found", annID)
 				}
 				return err
 			}
