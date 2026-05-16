@@ -282,7 +282,7 @@ Discord 那侧的清理（可选）：每个 application 在 Developer Portal `D
      - `Manage Channels`（admin 账号建 / 删房间会自动建 / 删 Discord channel）
      - `Manage Roles`（**必须**！邀请成员 = 在 channel 上加 per-channel permission override，没这个权限 `room invite` 会失败。源码：`internal/bot/discord/discord.go:305-316`）
      - `Attach Files`（M7 上传附件）
-     - 进阶：`Mention Everyone`（M6 的 `--all` 需要）
+     - 进阶：`Mention Everyone`（正文里写 `@everyone` 时 Discord 才会真的 ping；不勾仍能发送，但只是字面量）
 7. 把生成的 OAuth URL 复制 → 浏览器打开 → 选你的 guild → `Authorize` → 过
    captcha。bot 现在以"灰名"出现在 guild 成员里。
 
@@ -314,8 +314,11 @@ daemon 出站需要能到：
 >       已设，**且 daemon 已重启过一次让它生效**
 > - [ ] 每个要接入的 agent，都已在 Discord Developer Portal 备好独立 application、
 >       bot、bot token、Privileged Intents 已开、bot 已邀请进 guild（§5）
-> - [ ] 想让账号被 `room invite` 加入房间的话，该账号**必须先 online 一次**才能
->       让 daemon 抓到 Discord 端的 `bot_user_id`
+> - [ ] **agentchat 账号名 ≡ Discord bot username**（M9 Phase 2 强制）。`set-discord`
+>       会用 token 调 Discord REST `GET /users/@me` 校验；不一致 → `CONFLICT`，
+>       带 `--force-rename` 时 daemon 自动 PATCH bot username（Discord 限 2/h）
+> - [ ] `set-discord` 成功后 `bot_user_id` 已落库——`room invite` 不再要求账号先
+>       online 一次（M9 Phase 2 改进，原 M8 期遗留问题已解）
 
 ```bash
 # 准备 env
@@ -347,8 +350,13 @@ agentchat admin account create --name agent-alice --role user --json
 # }
 ACC=01HZ...   # 上一行返回的 id
 
-# 2. 把 §5.3 第 4 步复制的 Discord bot token 粘进来
+# 2. 把 §5.3 第 4 步复制的 Discord bot token 粘进来。
+#    daemon 会调 Discord REST 校验 token 并要求 account name == bot username。
 agentchat admin account set-discord "$ACC" --bot-token "MTI3OTM..."
+# 如果 Discord 端 bot username 暂时不叫 agent-alice（比如刚 Reset Token
+# 之前还没改名），加 --force-rename 让 daemon 替你 PATCH：
+#   agentchat admin account set-discord "$ACC" --bot-token "MTI..." --force-rename
+# 提醒：Discord 把 bot username 改名限速 2/h；触限会返 UNAVAILABLE。
 
 # 3. 让账号上线（daemon 内开 Discord WS 连接, 等待 Ready）
 agentchat admin account online "$ACC"
@@ -391,9 +399,8 @@ agentchat room create --name experiment-1
 # Created room experiment-1 (01HZ-room-id, channel=11223344...)
 ROOM=01HZ-room-id
 
-# 把 alice 拉进来 + 立即订阅
-# 注意：被邀请账号必须先 online 过一次（拿到 bot_user_id 才能给它加 channel
-# 权限）。新建账号、set-discord 后立刻 invite 会报错——先跑一次 online。
+# 把 alice 拉进来 + 立即订阅。
+# M9 Phase 2: bot_user_id 在 set-discord 时已写库，不需要先跑一次 online。
 agentchat room invite "$ROOM" "$ACC" --subscribe
 
 # 看看成员
@@ -429,11 +436,18 @@ done
 
 ```bash
 # state 里的 mentions[] 给出 message id 和 room id
-agentchat history $ROOM --limit 1               # 看上下文
-agentchat send $ROOM "好的，知道了"            # 回复
-agentchat read $MSG_ID                          # 标记已读
-agentchat reply-ack $MSG_ID                     # 如果对方设了 requires-ack
+agentchat read $ROOM                            # 一次拿全：未读 + 上下文 + 自动标已读
+agentchat send $ROOM --reply $MSG_ID "好的，知道了"
 ```
+
+`read <room>` 是 M9 之后的统一动词：
+
+- 默认模式（不带 `--before`）：返回 room 当前所有未读 + 最近 10 条已读上下文，
+  并在同一事务里把未读 batch 标 read（响应 `marked_read` 字段列出哪些被标了）
+- `--before <msg-id>`：纯查询，翻更老的历史（默认 50 条，上限 200），不动 read state
+- `--limit N`：调整上下文 / `--before` 页大小
+
+不再需要单独 `read <msg-id>` / `reply-ack <msg-id>`：被 @ 的消息看了就是处理。
 
 ### 7.3 公告
 
@@ -456,7 +470,7 @@ agentchat send $ROOM --attach /tmp/screenshot.png "看这个"
 # Discord 客户端会内联渲染图片
 
 # 接收方：
-agentchat history $ROOM
+agentchat read $ROOM
 # 在消息行下方会打印：
 #   [ATTACHMENT] msg=01HZ... name="screenshot.png" size=82345 mime=image/png -> ~/.agentchat/attachments/01HZ.../01HZ.../screenshot.png
 xdg-open ~/.agentchat/attachments/.../screenshot.png
@@ -502,7 +516,7 @@ token 解析优先级：`--token` > `$AGENTCHAT_TOKEN` > `<data-root>/cli.toml` 
 | `agentchat admin account rename <id>` | `--name <s>` (必) | 改名 |
 | `agentchat admin account set-role <id> <admin\|user>` | — | 改角色 |
 | `agentchat admin account delete <id>` | — | 删账号（连带 token 一并删） |
-| `agentchat admin account set-discord <id>` | `--bot-token <s>` (必) | 把 Discord bot token 存进来（AES-GCM 加密落库） |
+| `agentchat admin account set-discord <id>` | `--bot-token <s>` (必), `--force-rename` (可选) | 把 Discord bot token 存进来（AES-GCM 加密落库）。daemon 用 token 调 Discord REST `GET /users/@me` 校验 + 比对 `account.Name == bot.Username`，不一致默认 `CONFLICT`；带 `--force-rename` 则 daemon PATCH bot username（Discord 限 2/h）。`set-discord` 成功后 `bot_user_id` 同步落库 |
 | `agentchat admin account online <id>` | — | 用绑定的 token 连 Discord，等待 Ready |
 | `agentchat admin account offline <id>` | — | 干净断开 |
 | `agentchat admin account status <id>` | — | 显示 lifecycle state、是否有 bot token、provider 状态、Discord 身份 |
@@ -552,12 +566,14 @@ token 解析优先级：`--token` > `$AGENTCHAT_TOKEN` > `<data-root>/cli.toml` 
 
 | 命令 | 必填 | flag | 说明 |
 |---|---|---|---|
-| `agentchat send <room> [text]` | room | `--reply <msg>`, `--requires-ack`, `--priority normal\|urgent\|system`, `--file -\|<path>`, `--all`, `--attach <path>` (可重复) | 发消息；`text` 可省，从 `--file -` 读 stdin，或者只附附件 |
-| `agentchat history <room>` | — | `--before <msg>`, `--limit <n>` (默认 50, 上限 200) | 拉历史（最新优先），附件索引会附在每条下方 |
-| `agentchat read <msg-id>` | — | — | 标已读 |
-| `agentchat reply-ack <msg-id>` | — | — | 标"已回复"（清掉对方设的 `requires_ack`） |
+| `agentchat send <room> [text]` | room | `--reply <msg>`, `--priority normal\|urgent\|system`, `--file -\|<path>`, `--attach <path>` (可重复) | 发消息；`text` 可省，从 `--file -` 读 stdin，或者只附附件。正文里写 `@<name>` / `@everyone` 即 Discord 原生 mention（M9 Phase 2 解析；写 `<@id>` 会被拒）。 |
+| `agentchat read <room>` | room | `--limit <n>` (默认 10；带 `--before` 时默认 50；上限 200), `--before <msg>` | 打开一个房间：默认返回所有未读 + 最近 N 条已读上下文，并在同一事务里把未读标 read。`--before <msg-id>` 切换为纯查询历史翻页，不动 read state。响应里每条消息含 `author_name` / `display_content`（`<@id>` 已替换为 `@<name>`）/ `read_at` / `mentions`；room 部分含 `current_announcement_id` |
 
 `--priority system` 仅 admin 可用；普通用户传会被拒。
+
+**M9 Phase 2 删除的命令**：`history` / `read <msg-id>` / `reply-ack` /
+`send --all` / `send --requires-ack`。回顾 `read <room>` + Discord 原生 @ 系统
+覆盖了原 4 verb 的全部用例。
 
 #### 状态界面
 
@@ -595,34 +611,31 @@ token 解析优先级：`--token` > `$AGENTCHAT_TOKEN` > `<data-root>/cli.toml` 
 
   "totals": {                    // 维度 1：聚合计数
     "unread": 3,
-    "mentions": 1,
-    "pending_acks": 0,
+    "mentions": 1,                // 未读 ∩ @我（含 @everyone）
     "priority": 0,
-    "announcements": 1,          // M6: 未读群公告房间数
-    "system_announcements": 0    // M6: 未读系统公告条数
+    "announcements": 1,           // M6: 未读群公告房间数
+    "system_announcements": 0     // M6: 未读系统公告条数
   },
 
-  "rooms": [                     // 维度 2：每房间未读（仅订阅）
+  "rooms": [                      // 维度 2：每房间未读（仅订阅）
     { "room_id": "01HZ...", "name": "experiment-1", "unread": 3 }
   ],
 
-  "mentions": [                  // 维度 3：@ 我未读
+  "mentions": [                   // 维度 3：@ 我未读
     {
       "id": "01HZ...",
       "room_id": "01HZ...",
       "room_name": "experiment-1",
       "author_account_id": "01HZ...",
       "priority": "normal",
-      "requires_ack": false,
       "content": "alice 看下",
       "created_at": "2026-05-15T09:59:00Z"
     }
   ],
 
-  "pending_acks": [ /* 同上结构 */ ],   // 维度 4：要求我回复且未回
-  "priority":    [ /* 同上结构 */ ],   // 维度 5：urgent + system 的未读
+  "priority": [ /* 同上结构 */ ],   // 维度 4：urgent + system 的未读
 
-  "new_rooms": [                       // 维度 6：新加入的房间
+  "new_rooms": [                   // 维度 5：新加入的房间
     {
       "room_id": "01HZ...", "name": "...", "subscribed": true,
       "joined_at": "...",
@@ -630,9 +643,9 @@ token 解析优先级：`--token` > `$AGENTCHAT_TOKEN` > `<data-root>/cli.toml` 
     }
   ],
 
-  "recently_active": [ /* RoomEntry */ ],  // 维度 7：订阅房间按最后消息时间排序
+  "recently_active": [ /* RoomEntry */ ],  // 维度 6：订阅房间按最后消息时间排序
 
-  "health": {                              // 维度 8：系统健康栏
+  "health": {                              // 维度 7：系统健康栏
     "token_ok": true,
     "provider_status": "online",           // offline / connecting / online / errored
     "discord_reachable": true,
@@ -663,7 +676,11 @@ token 解析优先级：`--token` > `$AGENTCHAT_TOKEN` > `<data-root>/cli.toml` 
 
 注意：
 
+- M9 Phase 2 删除了 `pending_acks` 维度（既包括 `Totals.pending_acks` 也包括
+  `Snapshot.pending_acks[]`）。"要处理"的信号统一走 `mentions`：被 @ 的消息看了
+  就是处理了，不再有"要回复但未回"的中间状态。
 - `MessageEntry.id` 字段名是 `id`（M6-P3 修正过；M5 老版用 `message_id`）。
+  M9 Phase 2 同时删了 `MessageEntry.requires_ack` 字段。
 - 同一账号同一 daemon 同时最多 **8 个** `watch state` 订阅；超过会
   `RESOURCE_EXHAUSTED`。
 - `?since=<version>` 重连游标**当前不支持**（M5-P3-005 决议延后到 M8），传了
@@ -671,7 +688,7 @@ token 解析优先级：`--token` > `$AGENTCHAT_TOKEN` > `<data-root>/cli.toml` 
 - 各 list 维度的封顶（防止单帧失控）：
   | 维度 | cap |
   |---|---|
-  | `mentions` / `pending_acks` / `priority` | 50 条 |
+  | `mentions` / `priority` | 50 条 |
   | `new_rooms` | 5 条（按 `joined_at` 24h 内倒序） |
   | `recently_active` | 20 条 |
   | `announcements` / `system_announcements` | 20 条 |
@@ -778,7 +795,7 @@ token = "ac_xxxxxxxxxxxxxxxxxxxxxxx"
 | 单实例 | `<data-root>/agentchatd.lock` flock，第二个 daemon 直接 `CONFLICT` 退出 |
 | HTTP body 上限 | 1 MiB（`PAYLOAD_TOO_LARGE`）；附件单文件 10 MiB（`ATTACHMENT_TOO_LARGE`） |
 | 账号 watch 订阅上限 | 单账号 8 个（`RESOURCE_EXHAUSTED`） |
-| Audit log | 几乎所有写操作都记一行：账号 CRUD、token 签 / 撤、`set-discord` / `online` / `offline`、room CRUD / invite / kick / subscribe、消息 send / read / reply-ack、announcement create / read、system_announcement create / read、debug.send。`agentchat admin audit list` 读取（admin only） |
+| Audit log | 几乎所有写操作都记一行：账号 CRUD、token 签 / 撤、`set-discord`（含 force_rename / bot_user_id / bot_username 元数据）/ `online` / `offline`、room CRUD / invite / kick / subscribe、消息 send / read（`read <room>` 为每条标读消息记一行）、announcement create / read、system_announcement create / read、debug.send。`agentchat admin audit list` 读取（admin only） |
 | token 轮换 | `agentchat admin token create` 签新的，旧的 `agentchat admin token revoke` |
 | bot token 轮换 | Discord Portal `Reset Token` → `agentchat admin account set-discord <id> --bot-token <new>` |
 
@@ -788,7 +805,8 @@ token = "ac_xxxxxxxxxxxxxxxxxxxxxxx"
 |---|---|---|
 | 启动 daemon 立刻退出，提示 `CONFLICT another agentchatd is running` | 同 data-root 已有 daemon，或上次 crash 留下的 lock | `cat <data-root>/agentchatd.lock`（里面是 PID） → `kill <pid>` 或 `rm` 该 lock 文件 |
 | 启动 daemon 报 `CONFLICT socket path ... exists and is not a socket` | socket 路径上有同名普通文件 | daemon 拒绝自动删非 socket 文件以防误删数据；自己 `rm` 后重启 |
-| `agentchat room invite` 报错 `account has no captured Discord identity` | 被邀请账号从没 online 过，没 `bot_user_id` | 先 `agentchat admin account online <id>` 跑一次，再 invite |
+| `agentchat admin account set-discord` 返 `CONFLICT: bot username "X" does not match account name "Y"` | 账号名跟 Discord bot username 不一致（M9 Phase 2 强制） | 选 1：去 Discord Developer Portal 把 bot 改名为 Y；选 2：加 `--force-rename`（daemon 自己 PATCH；2/h 限速）|
+| `agentchat admin account set-discord --force-rename` 返 `UNAVAILABLE: discord rate-limited username rename` | 触了 Discord 2/h 限速 | 等一小时再试，或先在 Portal 手改名 |
 | `Error [PAYLOAD_TOO_LARGE]` (exit 22) | HTTP 请求 body 超过 1 MiB | 拆请求；常见于一次塞太多 invite / 巨长公告。**注意这与附件无关**，附件超限是 `ATTACHMENT_TOO_LARGE` |
 | `agentchat ...` 一直 hang | socket 路径不对 / daemon 没起来 | `ls -l <data-root>/agentchatd.sock`；检查 `$AGENTCHAT_HOME` 与 daemon 一致 |
 | `Error [AUTH_MISSING]` | 没设 `AGENTCHAT_TOKEN` 也没 `--token` 也没 `cli.toml` | 重新 `export AGENTCHAT_TOKEN=...`；或确认 `cli.toml` 路径 |

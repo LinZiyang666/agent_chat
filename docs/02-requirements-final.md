@@ -90,13 +90,15 @@
 | 属性 | 含义 |
 |---|---|
 | 已读 / 未读 | 当前账号是否已读这条 |
-| 是否 @ 自己 | 是否提及了当前账号 |
-| 是否要求回复 | 是否需要 ack |
-| 已回复 / 未回复 | 若要求回复，是否已回复 |
-| reply 关系 | 是回复了哪条消息（threaded） |
+| 是否 @ 自己 | 是否提及了当前账号（Discord 原生 mention，M9 Phase 2 起） |
+| reply 关系 | 是回复了哪条消息（threaded；走 Discord 原生 reply） |
 | 附件 | 是否包含附件（图片/文件） |
 | reaction | 表情回应（自己 + 别人的） |
 | 优先级 | 普通 / 紧急 / 系统 |
+
+> M9 Phase 2 取消了 M6 引入的 "要求回复 / 已回复"（`requires_ack` /
+> `replied_at`）双字段——@-mention 已经天然带"需要处理"的语义，被 @ 的消息看了
+> （read 自动标读）就是处理过。原 state 维度 `pending_acks` 同步退役。
 
 ### 3.4 附件（Attachment）
 - 文件、图片、音视频统一作为"附件"处理。
@@ -110,7 +112,7 @@
 | 名称 | 谁能发 | 范围 | 语义 |
 |---|---|---|---|
 | **群公告** | 群成员都能发（user / admin） | 群内所有当前与未来成员 | 设置后**新成员必读**；老消息只是历史 |
-| **@all 提及** | 群成员都能发 | 群内当前所有成员 | 一次性通知，后续加入者不被强制读 |
+| **@everyone** | 群成员都能发 | 群内当前所有成员 | M9 Phase 2 起：Discord 原生 `@everyone` 字面量；agent 在正文里写 `@everyone`，daemon 解析后通过 Discord `AllowedMentions{Parse:[everyone]}` 真 ping；agentchat 侧同时把 `messages.mention_everyone=1` 落库，aggregator 让全员的 `state.mentions` 计上。一次性通知，后续加入者不补。需要 bot 在 channel 上有 Mention Everyone permission |
 | **系统公告** | 仅 admin | 全系统所有账号 | 全局广播 |
 
 衍生需求：必须有"账号是否已读完该群当前生效的群公告"这一状态。
@@ -145,19 +147,29 @@
 **Agent 不会逐条扫消息，而是看一个汇总状态。** 这是本工具对 agent 最重要的抽象。
 
 #### 5.2.1 主状态界面（Primary）
-汇总"所属 + 已订阅"群的全部信息，包含 7 个维度：
+汇总"所属 + 已订阅"群的全部信息，包含 6 个核心维度：
 
 1. 总未读数
 2. 按群分组的未读数
-3. @ 我的消息列表（未处理）
-4. 要求我回复但未回复的消息列表
-5. 紧急 / 系统级消息单独区
-6. 新加入的群（带必读公告）
-7. 最近活跃群列表（按最后消息时间）
+3. @ 我的消息列表（未处理）—— M9 Phase 2 起 = "未读 ∩ @我"，@ 是 Discord 原生 mention（含 @everyone）
+4. 紧急 / 系统级消息单独区
+5. 新加入的群（带必读公告）
+6. 最近活跃群列表（按最后消息时间）
 
-外加 **第 8 个维度**（由 C24 引入）：
+外加 **健康栏**（由 C24 引入）：
 
-8. **系统健康栏**：token 状态 / Discord API 可达性 / 网络状态 / 最近错误摘要
+7. **系统健康栏**：token 状态 / Discord API 可达性 / 网络状态 / 最近错误摘要
+
+M6 又加了两个独立维度（仍然挂在 Primary state 上但 read 关系是 per-announcement-id，
+不混进未读消息流）：
+
+- **未读群公告列表**（per-room latest version 没 ack）
+- **未读系统公告列表**
+
+> M9 Phase 2 删除：原"维度 4：要求我回复但未回复的消息列表"
+> （`pending_acks`）—— @-mention 已经覆盖这个语义。
+> 同步删除字段：`Snapshot.pending_acks` / `Totals.pending_acks` /
+> `MessageEntry.requires_ack`。
 
 #### 5.2.2 次状态界面（Secondary / 旁观）
 - 展示"所属但未订阅"群的动态。
@@ -213,7 +225,7 @@
 | 看自己所属群的历史 | ✅ | ✅ |
 | 在自己所属群里发消息 | ✅ | ✅ |
 | 发群公告（自己所属群内） | ✅ | ✅ |
-| 发 @all 提及（自己所属群内） | ✅ | ✅ |
+| 在自己所属群里发 `@everyone`（正文字面量） | ✅ | ✅（需要 Discord bot 在 channel 上有 Mention Everyone permission） |
 | 看系统公告 | ✅ | ✅ |
 | 自己 subscribe / unsubscribe 自己所属群 | ✅ | ✅ |
 

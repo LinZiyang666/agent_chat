@@ -14,7 +14,15 @@
 > - **M5 状态聚合 + watch state**：✅ 完成 (2026-05-14)。
 > - **M6 公告 + @all + system announcement**：✅ 完成 (2026-05-14)，Phase 3 一轮（`M6-P3-001`/`002`）。
 > - **M7 附件 (outbound 10 MB cap + inbound downloader)**：✅ 完成 (2026-05-14)，Phase 3 两轮（`M7-P3-001`–`004`）。
-> - **M8 全项目抛光**：🔧 进行中 (2026-05-15)。6-agent 审计完成，3 个 P0 (connector pump 跨代删除 / mock send-after-close / send.go 错误码) + 安全/代码/构建 P1 已修；详见 [`milestones/M8-findings.md`](./milestones/M8-findings.md)。
+> - **M8 全项目抛光**：✅ 完成 (2026-05-15)。6-agent 审计完成，3 个 P0 (connector pump 跨代删除 / mock send-after-close / send.go 错误码) + 安全/代码/构建 P1 已修；详见 [`milestones/M8-findings.md`](./milestones/M8-findings.md)。
+> - **M9 CLI 两动词收敛 + Discord 原生 @ 系统对接**：🔧 Phase 1/2 完成 (2026-05-16)，Phase 3 文档同步完成、user-driven audit 待启动。设计稿 [`06-cli-redesign.md`](./06-cli-redesign.md)；Phase 1 / Phase 2 review 记录在 [`../reviews/`](../reviews/)；改动概览：
+>   - 命令收敛：`history` / `read <msg>` / `reply-ack` / `send --all` / `send --requires-ack` 全部退役；新增 `read <room>`，`send` 正文里直接写 `@<name>` / `@everyone`。
+>   - Discord 入站：`discordToMessage` 解析 `m.Mentions[]` + `m.MentionEveryone`，ingester 反查 `bot_user_id → account_id` 写 `message_mentions`，按 room member 过滤非成员。
+>   - Discord 出站：daemon 调 `bot.ParseMentions` 重写 content + 设 `AllowedMentions`（默认全禁 + 显式白名单），所有路径统一走 `ChannelMessageSendComplex`。
+>   - `set-discord` 校验 + `--force-rename`：用 `bot.IdentityProber` 调 Discord REST `/users/@me` 确认 `account.Name == bot.Username`；不一致默认 `CONFLICT`，加 flag 走 `PATCH /users/@me`；成功后 `bot_user_id` 落库。
+>   - `ReadRoomResponse` 含 `author_name` / `display_content` / `read_at` / `current_announcement_id`（空消息也保证 announcement 字段）。
+>   - Schema 收缩：migration 0005 加 `message_mentions` 表 + `messages.mention_everyone`；0006 DROP `messages.requires_ack` / `mention_all`、`message_states.replied_at`。
+>   - State 收缩：删 `Snapshot.PendingAcks` / `Totals.PendingAcks` / `MessageEntry.RequiresAck` 维度，"要处理"的信号统一走 mentions。
 
 ## 1. 目标
 

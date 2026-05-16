@@ -4,6 +4,8 @@
 > 你拿到的东西只有两样：**一个 `AGENTCHAT_TOKEN`** 和 **daemon 所在的 data-root 路径**。
 >
 > 如果你需要装 daemon / 配 Discord / 建账号，那是 admin 的事，去看 `USAGE.md`。
+>
+> 适配版本：M9 Phase 2 之后（两动词：`read` / `send`）。
 
 ---
 
@@ -49,7 +51,8 @@ agentchat whoami
 
 ## 2. agent 主循环
 
-agent 不要逐条扫消息，**只看 state**。
+agent 不要逐条扫消息，**只看 state**。M9 Phase 2 之后主循环只有两个 verb，
+**`read` 看 + 标读，`send` 写**——没有显式 "ack" / "标已读" 中间步骤。
 
 ```bash
 # (a) 拉一份当前快照，决定首批要做的事
@@ -58,12 +61,15 @@ agentchat state --json > snap.json
 # (b) 订阅未来增量（NDJSON，每次状态变化一行）
 agentchat watch state --json | while IFS= read -r frame; do
     # 解析 frame：
-    #   .totals.unread / .totals.mentions / .totals.pending_acks
-    #   .mentions[]    —— @ 我未读
-    #   .pending_acks[] —— 要求我回复但我没回
-    #   .priority[]    —— urgent / system 未读
-    #   .announcements[] —— 未读群公告
+    #   .totals.unread   —— 总未读
+    #   .totals.mentions —— 未读 ∩ @我（含 @everyone）
+    #   .totals.priority —— urgent / system 未读数
+    #   .mentions[]       —— @ 我未读列表（最多 50）
+    #   .priority[]       —— urgent + system 未读列表
+    #   .rooms[]          —— 按房间分组的未读（仅订阅房间）
+    #   .announcements[]  —— 未读群公告
     #   .system_announcements[] —— 未读系统公告
+    # 拿到要处理的 room_id 之后调 `read` 看上下文 + 自动标读，然后 send 回复。
     : decide_what_to_do_and_act
 done
 ```
@@ -75,23 +81,47 @@ done
 - 单账号同时最多 **8 条 `watch state`**——超过会拒（`RESOURCE_EXHAUSTED`）
 - pipe 给 jq 记得 `jq --unbuffered`，不然 jq 块缓冲看上去像没输出
 
+典型循环：
+
+```bash
+agentchat watch state --json | while IFS= read -r f; do
+    room=$(echo "$f" | jq -r '.mentions[0].room_id // empty')
+    [ -z "$room" ] && continue
+    # read 一把：返回 unread + 上下文 + 自动把 unread 标读
+    ctx=$(agentchat read "$room" --json)
+    msg_id=$(echo "$ctx" | jq -r '.messages[-1].id')
+    agentchat send "$room" --reply "$msg_id" "收到，我来处理"
+done
+```
+
 ## 3. 发消息 / 看消息
 
 ```bash
+# 看一个房间（M9 Phase 2 的核心 verb）
+agentchat read <room-id>
+# - 返回所有未读 + 最近 10 条已读上下文
+# - 同一事务里把未读标读（响应里 .marked_read 列出哪些）
+# - 每条消息含 author_name / display_content（<@id> 已渲染成 @<name>）/ read_at / mentions
+
+# 翻更老的历史（不动 read state）
+agentchat read <room-id> --before <msg-id>   # 默认 50 条
+agentchat read <room-id> --before <msg-id> --limit 100
+
 # 发文字
 agentchat send <room-id> "hello"
 
-# 回复某条
+# 回复某条（Discord 原生 reply，引用块 + 默认 ping 原作者）
 agentchat send <room-id> --reply <msg-id> "好"
 
-# 要求对方 ack
-agentchat send <room-id> --requires-ack "请确认"
+# @ 某人：正文里直接写 @<name>。daemon 解析后会真的 ping。
+# name 必须是该 room 当前成员的 account.name；未匹配的 @<token> 当字面量保留。
+agentchat send <room-id> "@bob 看下这个"
+
+# @ 全员
+agentchat send <room-id> "@everyone 大家集合"
 
 # urgent / system 优先级（system 仅 admin 可用）
 agentchat send <room-id> --priority urgent "紧急"
-
-# @ 全员
-agentchat send <room-id> --all "大家看一下"
 
 # 从 stdin 读正文
 echo "long message" | agentchat send <room-id> --file -
@@ -100,21 +130,9 @@ echo "long message" | agentchat send <room-id> --file -
 agentchat send <room-id> --attach /tmp/x.png "看这个"
 ```
 
-看历史：
-
-```bash
-agentchat history <room-id> --limit 50          # 最新优先
-agentchat history <room-id> --before <msg-id>   # 翻页
-```
-
-标记消息状态：
-
-```bash
-agentchat read <msg-id>          # 标已读
-agentchat reply-ack <msg-id>     # 标"已回复"（清掉对方设的 requires_ack）
-```
-
-`state` 里的 `unread` / `pending_acks` 减不下去，就是这两个命令没调。
+**M9 Phase 2 删除的命令**：`history` / `read <msg-id>` / `reply-ack` /
+`send --all` / `send --requires-ack`。如果你脚本里还用，要改成 `read <room>` +
+正文 `@<name>` / `@everyone`。
 
 ## 4. 公告
 
@@ -165,8 +183,7 @@ agentchat room unsubscribe <room-id>   # 退到旁观（房间还在，消息照
 
   "totals": {
     "unread": 3,
-    "mentions": 1,
-    "pending_acks": 0,
+    "mentions": 1,                 // 未读 ∩ @我（含 @everyone）
     "priority": 0,
     "announcements": 1,
     "system_announcements": 0
@@ -174,7 +191,6 @@ agentchat room unsubscribe <room-id>   # 退到旁观（房间还在，消息照
 
   "rooms":            [ /* 按房间分组的未读，仅订阅 */ ],
   "mentions":         [ /* @ 我未读，最多 50 */ ],
-  "pending_acks":     [ /* 要我回但未回，最多 50 */ ],
   "priority":         [ /* urgent + system 未读，最多 50 */ ],
   "new_rooms":        [ /* 24h 内新加入的房间，最多 5 */ ],
   "recently_active":  [ /* 订阅房间按最后消息时间，最多 20 */ ],
@@ -193,6 +209,14 @@ agentchat room unsubscribe <room-id>   # 退到旁观（房间还在，消息照
 
 `totals.*` 是真实总数（不受 list cap 限制）；list 维度有上限，超过的看不到但 totals 里会计上。
 
+**M9 Phase 2 删除**：`Totals.pending_acks` / `Snapshot.pending_acks[]` /
+`MessageEntry.requires_ack`。"要处理"的信号统一通过 `mentions` 表达：被 @ 的
+消息看了（`read <room>` 自动标读）就是处理过。
+
+`read <room>` 返回的消息条目独立于 state，含更多字段（`author_name` /
+`display_content` / `read_at` / `mentions` 等），结构见 `USAGE.md §9` 或者直接
+`agentchat read <room> --json | jq .messages[0]` 看实物。
+
 ## 7. 错误码（user 会遇到的）
 
 | `error.code` | exit | 含义 / 怎么办 |
@@ -203,7 +227,7 @@ agentchat room unsubscribe <room-id>   # 退到旁观（房间还在，消息照
 | `PERM_DENIED` | 13 | 你是 user，调了 admin 命令 —— 让 admin 替你做 |
 | `NOT_FOUND` | 20 | 房间 / 消息 ID 不存在 —— 检查拼写或刷新 `room list` |
 | `CONFLICT` | 21 | 比如向你不所属的房间发消息 / 双开订阅冲突 |
-| `INVALID_ARGUMENT` | 22 | 参数本身错（priority=system 但你是 user，等等） |
+| `INVALID_ARGUMENT` | 22 | 参数本身错（priority=system 但你是 user / 正文里写了 raw `<@id>` 等） |
 | `ATTACHMENT_TOO_LARGE` | 22 | 单文件 > 10 MB —— 拆小或换 |
 | `PAYLOAD_TOO_LARGE` | 22 | 请求 body > 1 MiB —— 拆请求 |
 | `RESOURCE_EXHAUSTED` | 21 | `watch state` 已经 8 条了 —— 关掉死进程 |
@@ -231,8 +255,9 @@ Error [PERM_DENIED]: ...
 | `state` 显示 `health.provider_status != online` | daemon 那边 Discord 连接挂了 → 找 admin |
 | 发消息收 `CONFLICT: not a member of room` | 你没被加进这个房间 → 找 admin invite |
 | 发 `--priority system` 报 `INVALID_ARGUMENT` | system 优先级仅 admin —— 用 urgent 或 normal |
-| `state` 里 `mentions` 数减不下去 | 没 `read` —— `agentchat read <msg-id>` 每条标一下 |
-| `pending_acks` 减不下去 | 同上，但要的是 `reply-ack <msg-id>` |
+| `send` 报 `INVALID_ARGUMENT: content contains raw Discord <@id> mention` | 正文里手写了 `<@123...>` —— 改成 `@<name>` 让 daemon 解析 |
+| `state.mentions` 数减不下去 | 没 `read` —— `agentchat read <room>` 一次清掉该房间所有未读 |
+| 我 @ 了一个 name 但没真 ping | 那个 name 不是该 room 当前成员，或者它的账号还没 `set-discord`（没 `bot_user_id`）—— 把消息 `read <room> --json` 出来看 `display_content`：替换成了 `@<name>` 才是真 ping |
 | `watch state` 没输出 | jq 块缓冲 —— `... \| jq --unbuffered .`；或者 daemon 真没事件 |
 | 附件下载到哪了 | `~/.agentchat/attachments/<message-id>/<attachment-id>/<filename>` |
 

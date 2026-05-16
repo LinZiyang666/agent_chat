@@ -2,6 +2,7 @@
 
 > 基线：`02-requirements-final.md` + `03-architecture.md`。
 > 目标：把项目拆成 **8 个里程碑（M1–M8）**，每个都有可演示的完成标准，按依赖顺序推进。
+> M9 在 M8 之后追加（CLI 两动词收敛 + Discord 原生 @ 系统对接），见 §9.9。
 > 原则：**早期不接 Discord**——前两个里程碑用 mock provider 跑通主干，先把"骨头"立起来；到 M3 才插 Discord 这块"肉"。这样能让 Bot 抽象层（D3.3）真正经受考验。
 
 ---
@@ -524,6 +525,83 @@ $ echo $?
 
 ### 工作量
 中等（3–5 工作日，但可以贯穿前面 M 持续做一部分）。
+
+---
+
+## 9.9 M9 — CLI 两动词收敛 + Discord 原生 @ 系统对接
+
+### 目标
+把 M4–M8 累积的"工程概念泄漏到 CLI"（`requires_ack` / `mention_all` / `read <msg>` /
+`reply-ack` / `history`）全部清掉，让 CLI 表面只剩**用户心智里真实存在的两个动作**
+：看 + 写。同时把 mention 系统从内部 content-LIKE 切到 Discord 原生 `<@id>` +
+`@everyone`，让人在 Discord 客户端打 `@alice` 真的能 ping 到 alice agent。
+
+### 范围
+**命令面**：
+- 删 `agentchat history` / `agentchat read <msg-id>` / `agentchat reply-ack` /
+  `send --all` / `send --requires-ack`
+- 新增 `agentchat read <room>`：一次返回所有未读 + 上下文，同事务标读；
+  `--before <msg-id>` 切换为纯查询历史翻页（默认 50 条，常规模式默认 10 条上下文）
+- `send` 正文里直接写 `@<name>` / `@everyone`，daemon 解析；raw `<@id>` 拒绝
+- `agentchat admin account set-discord` 加 `--force-rename`（同时支持
+  `?force_rename=true` query）
+
+**daemon 内部**：
+- `bot.ParseMentions(content, members)` 纯函数：扫 `@<name>` / `@everyone`，
+  按 room member 解析，去重，rejects raw `<@id>`
+- `discord.SendMessage` 统一走 `ChannelMessageSendComplex` + 显式
+  `AllowedMentions{Parse, Users, RepliedUser}`（默认全禁 + 白名单）
+- `discordToMessage` 解析 `m.Mentions[]` + `m.MentionEveryone`
+- ingester 反查 `bot_user_id → account_id` 写 `message_mentions`，按 room
+  member 集合过滤非成员
+- ingester conflict path 合并 mention 元数据（不直接 `return nil`），
+  `ApplySendMetadata` 对 `mention_everyone` 用 `MAX(...)` OR-merge
+- 新 `bot.IdentityProber` interface（discord/REST + mock 两实现）。
+  `set-discord` handler 用 prober 调 Discord `GET /users/@me` 验证
+  `account.Name == bot.Username`，不一致 `CONFLICT`，`--force-rename` 走
+  `PATCH /users/@me`；`bot_user_id` 同事务落库（取代 M8 期"必须先 online 一次"
+  的痛点）
+
+**Schema**：
+- migration `0005_m9_mentions.up.sql`：新 `message_mentions(message_id,
+  account_id)` 表 + `messages.mention_everyone` 列；老 `mention_all` 数据复制到
+  `mention_everyone`
+- migration `0006_m9_drop_legacy_columns.up.sql`：DROP
+  `messages.requires_ack` / `messages.mention_all` /
+  `message_states.replied_at`
+- store 层 `Message` / `MessageState` 同步收缩；`SendMetadata` 去 `RequiresAck` /
+  `MentionAll`
+
+**State view**：
+- 删 `Snapshot.PendingAcks` / `Totals.PendingAcks` / `MessageEntry.RequiresAck`
+- `CountMentionsForSubscribed` / `ListMentionsForSubscribed` 改用
+  `mention_everyone OR EXISTS message_mentions`，per-user mention 保持
+  subscribed-only 守卫
+- 主状态维度从 8 (M6) 收成 7 (M9)：unread / rooms / mentions / priority /
+  new_rooms / recently_active / health（+ M6 的 announcements / system_announcements
+  两个独立维度）
+
+**ReadRoomResponse**：
+- 顶层 `room.current_announcement_id`（即使消息列表为空也填充）
+- 每条 message 含 `author_name` / `display_content`（`<@id>` 已渲染成 `@<name>`） /
+  `read_at` / `mentions`
+
+### 完成标准
+- 三动词主循环（`watch state → read → send`）可端到端跑通；
+  设计稿 §14 的验收脚本可直接照抄
+- `go test ./... -count=1` 全绿，含新 `internal/bot.ParseMentions` 12 测试 +
+  `internal/api/m9_phase2_test.go` 8 集成测试 + repo 层 mention/merge 测试
+- `docs/USAGE.md` / `docs/USAGE-USER.md` / `02-requirements-final.md` /
+  `00-overview.md` / `04-roadmap.md` 完全反映新 verb 面与 schema
+- 设计稿 `docs/06-cli-redesign.md`，Phase 1 / Phase 2 review 记录入
+  `reviews/2026-05-16-*.md`
+- Phase 3 user-driven audit 通过
+
+### 工作量
+分三段已完成，总耗时 ~两天：
+- Phase 1：schema + Discord 入站解析（commit `1a91072`）
+- Phase 2：出站 mention pipeline + CLI 收敛 + schema drop（commit `cd8db93`）
+- Phase 3：文档同步 + audit（进行中）
 
 ---
 
