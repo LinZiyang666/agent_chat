@@ -1,0 +1,78 @@
+# goreleaser config for agentchat.
+#
+# Tag push (v*) → multi-platform tarballs + install.sh + SHA256SUMS
+# uploaded to GitHub Releases.
+#
+# Each tarball contains BOTH binaries (agentchatd + agentchat) plus
+# LICENSE and README.md.
+#
+# Run locally: goreleaser release --snapshot --clean --config build/goreleaser.yaml
+version: 2
+
+project_name: agentchat
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: agentchatd
+    main: ./cmd/agentchatd
+    binary: agentchatd
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/LinZiyang666/agentchat/cmd/agentchatd/cmds.Version={{ .Version }}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+  - id: agentchat
+    main: ./cmd/agentchat
+    binary: agentchat
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/LinZiyang666/agentchat/cmd/agentchat/cmds.Version={{ .Version }}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: agentchat
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [tar.gz]
+    builds:
+      - agentchatd
+      - agentchat
+    files:
+      - README.md
+
+release:
+  extra_files:
+    - glob: scripts/install.sh
+
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
