@@ -80,23 +80,20 @@
 > **完全没碰过 Discord 的话先去 [§5](#5-discord-一侧的配置小白向) 把 application /
 > bot / token / guild ID 准备好，再回这里。**
 
-### 3.1 编译
+### 3.1 安装
 
 ```bash
-# 需要 Go 1.25+ ；纯 Go 实现，不需要 cgo
-git clone https://github.com/LinZiyang666/agentchat.git
-cd agentchat
-make build
-# 产物：bin/agentchatd  bin/agentchat
-./bin/agentchatd version
-./bin/agentchat version
+curl -fsSL https://github.com/LinZiyang666/agent_chat/releases/latest/download/install.sh | sh
 ```
+
+二进制装在 `~/.agentchat/bin/{agentchatd,agentchat}`，数据目录是
+`~/.agentchat`。脚本会提示把 `~/.agentchat/bin` 加到 PATH，加完后
+`agentchatd version` / `agentchat version` 应该能跑通。
 
 ### 3.2 启动 daemon（首次运行会打印 root token）
 
 ```bash
-mkdir -p /tmp/agentchat-demo
-./bin/agentchatd serve --data-root /tmp/agentchat-demo
+agentchatd serve
 ```
 
 第一次启动会**只打印一次** root admin 的 API token：
@@ -116,14 +113,13 @@ mkdir -p /tmp/agentchat-demo
 ### 3.3 在另一个终端用 CLI
 
 ```bash
-export AGENTCHAT_HOME=/tmp/agentchat-demo          # 指向 daemon 的数据目录
 export AGENTCHAT_TOKEN=agch_xxxxxxxxxxxxxxxxxxxxxxxxxx
 
 # 想跨终端 / 跨重启都用这个 token，写进 cli.toml（CLI 会自动读取）：
-#   echo 'token = "agch_..."' > "$AGENTCHAT_HOME/cli.toml"
-#   chmod 600 "$AGENTCHAT_HOME/cli.toml"
+#   echo 'token = "agch_..."' > ~/.agentchat/cli.toml
+#   chmod 600 ~/.agentchat/cli.toml
 
-./bin/agentchat whoami
+agentchat whoami
 # ID:    01HZ...
 # Name:  root
 # Role:  admin
@@ -141,8 +137,7 @@ export AGENTCHAT_TOKEN=agch_xxxxxxxxxxxxxxxxxxxxxxxxxx
 | 项 | 要求 |
 |---|---|
 | OS | Linux / macOS / WSL（依赖 Unix domain socket） |
-| Go | 1.25.0 或更高（见 `go.mod`） |
-| C 工具链 | **不需要**（modernc.org/sqlite 是纯 Go） |
+| 架构 | amd64 / arm64（install.sh 自动选） |
 | 网络 | 出站可达 `discord.com`、`gateway.discord.gg`、`cdn.discordapp.com`（HTTPS / WSS，TCP 443） |
 
 **跨平台注意**：
@@ -153,25 +148,7 @@ export AGENTCHAT_TOKEN=agch_xxxxxxxxxxxxxxxxxxxxxxxxxx
 - **macOS**：`xdg-open` 改用 `open`；`flock` 行为略不同但 daemon 单实例锁仍能
   工作；其余命令一致。
 
-### 4.2 编译选项
-
-`Makefile` 已经处理了版本注入和构建可复现性：
-
-```bash
-make build         # 同时编译 agentchatd + agentchat
-make build-cli     # 只编译 agentchat
-make build-daemon  # 只编译 agentchatd
-make test          # 全部单元测试
-make test-race     # 带 race detector（约 ≤ 45 min）
-make smoke         # M1..M7 端到端 mock 烟雾测试（不连真 Discord）
-make cover         # 覆盖率（仅含真实代码包）
-make clean
-```
-
-构建出的二进制会带版本号（来自 `git describe --tags --dirty --always`），看
-`agentchat version` / `agentchatd version`。
-
-### 4.3 启动 daemon
+### 4.2 启动 daemon
 
 ```bash
 agentchatd serve [flags]
@@ -196,62 +173,38 @@ agentchatd serve [flags]
 6. 数据库为空时**创建 root admin 账号**并打印一次 API token（见 §3.2）。
 7. 监听 `<data-root>/agentchatd.sock`（`0o600`）。
 
-daemon 是**前台进程**。生产部署请用 systemd / supervisord 管：
-
-```ini
-# /etc/systemd/system/agentchatd.service
-[Unit]
-Description=agentchat daemon
-After=network-online.target
-
-[Service]
-Type=simple
-User=agentchat
-UMask=0077
-WorkingDirectory=/var/lib/agentchat
-Environment=AGENTCHAT_HOME=/var/lib/agentchat
-Environment=AGENTCHAT_DISCORD_GUILD_ID=123456789012345678
-ExecStart=/usr/local/bin/agentchatd serve
-Restart=on-failure
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-```
-
-> **首次部署的坑**：root admin 的一次性 token 是写到 **stdout** 的（其他日志走
-> stderr）。如果你直接 `systemctl start agentchatd` 第一次启动，token 会被 journal
-> 吃掉——可以这样捞：
->
-> ```bash
-> sudo journalctl -u agentchatd | grep AGENTCHAT_TOKEN
-> ```
->
-> 或者**强烈推荐**先在终端里 `sudo -u agentchat /usr/local/bin/agentchatd serve
-> --data-root /var/lib/agentchat` 跑一次，把 token 存进密码管理器后 Ctrl-C，再
-> `systemctl enable --now agentchatd`。
-
-### 4.4.1 卸载 / 重置
+daemon 是**前台进程**。后台跑最简单的做法是 `nohup ... &` 或开个 tmux：
 
 ```bash
-# 1. 停 daemon
-sudo systemctl disable --now agentchatd
-
-# 2. 删数据目录（含 SQLite、master.key、附件、socket、lock）
-sudo rm -rf /var/lib/agentchat
-
-# 3. （可选）在 Discord 一侧清理
-#    每个 application：Developer Portal → 该 application → Delete App
-#    每个 channel：     Discord 客户端右键 channel → 删除
-#    （或者直接删 guild）
-#
-# 4. 删二进制
-sudo rm /usr/local/bin/agentchatd /usr/local/bin/agentchat
+nohup agentchatd serve >> ~/.agentchat/agentchatd.log 2>&1 &
 ```
 
-> 删 `master.key` 后所有 bot token 密文不可解；如果只是想"重置 admin 密钥但
-> 保留消息历史"，目前**没有现成命令**，只能改 SQLite。
+想用 systemd user service 自启动也行，自己照 `~/.config/systemd/user/` 套模板，
+`ExecStart=$HOME/.agentchat/bin/agentchatd serve` 即可。
+
+> **首次启动的坑**：root admin 的一次性 token 是写到 **stdout** 的。第一次起
+> daemon 时一定要在前台跑、把 token 复制存下，再后台化；丢了只能 `rm -rf
+> ~/.agentchat` 重来一次。
+
+### 4.3 卸载 / 重置
+
+```bash
+# 只删二进制，保留数据：
+curl -fsSL https://github.com/LinZiyang666/agent_chat/releases/latest/download/install.sh \
+  | sh -s -- --uninstall
+
+# 连同 ~/.agentchat 数据目录一起删（SQLite、master.key、附件、socket）：
+curl -fsSL https://github.com/LinZiyang666/agent_chat/releases/latest/download/install.sh \
+  | sh -s -- --uninstall --purge
+
+# 想留下二进制只清数据：手动 `rm -rf ~/.agentchat`，下次启动会重建并打印新 root token。
+```
+
+Discord 那侧的清理（可选）：每个 application 在 Developer Portal `Delete App`；
+每个 channel 在客户端右键 `删除`。
+
+> 删 `master.key` 后所有 bot token 密文不可解；只想"重置 admin 密钥但保留消息
+> 历史"目前**没有现成命令**，只能改 SQLite。
 
 ### 4.4 数据目录布局
 
@@ -366,7 +319,7 @@ daemon 出站需要能到：
 
 ```bash
 # 准备 env
-export AGENTCHAT_HOME=/var/lib/agentchat   # 或你 daemon 的 --data-root
+export AGENTCHAT_HOME=~/.agentchat   # install.sh 装的默认；自定义过 --prefix 就跟自己的
 export AGENTCHAT_TOKEN=ac_xxxxxxxxxxxxxxxxxxxxxxxxxx
 
 # (一次性) 把 guild ID 写进配置 — 二选一
@@ -505,8 +458,8 @@ agentchat send $ROOM --attach /tmp/screenshot.png "看这个"
 # 接收方：
 agentchat history $ROOM
 # 在消息行下方会打印：
-#   [ATTACHMENT] msg=01HZ... name="screenshot.png" size=82345 mime=image/png -> /var/lib/agentchat/attachments/01HZ.../01HZ.../screenshot.png
-xdg-open /var/lib/agentchat/attachments/.../screenshot.png
+#   [ATTACHMENT] msg=01HZ... name="screenshot.png" size=82345 mime=image/png -> ~/.agentchat/attachments/01HZ.../01HZ.../screenshot.png
+xdg-open ~/.agentchat/attachments/.../screenshot.png
 ```
 
 > 单文件超过 **10 MB** → CLI 报 `ATTACHMENT_TOO_LARGE`，退出码 22。
@@ -753,7 +706,7 @@ token 解析优先级：`--token` > `$AGENTCHAT_TOKEN` > `<data-root>/cli.toml` 
 CLI 的输出格式：
 
 ```
-Error [CONFLICT]: another agentchatd is running with this data root (lock file /var/lib/agentchat/agentchatd.lock)
+Error [CONFLICT]: another agentchatd is running with this data root (lock file ~/.agentchat/agentchatd.lock)
 Caused by: <wrapped err>
 ```
 
@@ -780,12 +733,12 @@ Caused by: <wrapped err>
 ```toml
 # 数据目录（一般留空，让 --data-root / $AGENTCHAT_HOME 决定）
 # 设了不一样的值的话，下面三个派生路径会重新基于新值算
-# data_root = "/var/lib/agentchat"
+# data_root = "/home/you/.agentchat"
 
 # socket / db / master.key 路径（一般不动）
-# socket_path = "/var/lib/agentchat/agentchatd.sock"
-# db_path     = "/var/lib/agentchat/agentchatd.db"
-# key_path    = "/var/lib/agentchat/master.key"
+# socket_path = "/home/you/.agentchat/agentchatd.sock"
+# db_path     = "/home/you/.agentchat/agentchatd.db"
+# key_path    = "/home/you/.agentchat/master.key"
 
 [log]
 level = "info"   # debug / info / warn / error
