@@ -56,8 +56,6 @@ archives:
     builds:
       - agentchatd
       - agentchat
-    files:
-      - README.md
 
 release:
   extra_files:
