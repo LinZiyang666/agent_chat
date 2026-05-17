@@ -343,8 +343,16 @@ func DeleteRoom(conn *connector.Connector, bundler store.Bundler, recorder *audi
 		}
 		if channelID != "" {
 			if err := p.DeleteChannel(r.Context(), channelID); err != nil {
-				WriteError(w, err)
-				return
+				// "Already gone" is the target state — keep going
+				// so the SQLite row + audit are written. Common path
+				// when the Discord channel was deleted out-of-band
+				// (the EventChannelDeleted handler may also have
+				// archived the room first; deletion still cleans up).
+				ec, _ := errcode.As(err)
+				if ec == nil || ec.Code != errcode.NotFound {
+					WriteError(w, err)
+					return
+				}
 			}
 		}
 		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {

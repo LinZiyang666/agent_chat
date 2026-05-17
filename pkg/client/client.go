@@ -209,29 +209,21 @@ func (c *Client) RevokeToken(ctx context.Context, tokenID string) error {
 
 // ---- M3: Discord + lifecycle ----
 
-// SetDiscordOptions carries the optional knobs SetDiscord exposes. M9
-// Phase 2 added ForceRename: when true, a username mismatch between
-// the agentchat account and the Discord bot triggers a PATCH on the
-// bot's username instead of a CONFLICT response.
-type SetDiscordOptions struct {
-	ForceRename bool
-}
+// SetDiscordOptions is reserved for future knobs. Currently empty;
+// kept as a variadic param so call sites can pass nothing.
+type SetDiscordOptions struct{}
 
 // SetDiscord encrypts and stores a bot token on the given account.
-// The daemon verifies the token + username with Discord REST before
-// persisting; see internal/api/v1/discord.go::SetDiscord.
+// The daemon verifies the token with Discord REST GET /users/@me and
+// snaps the local account.name to whatever Discord reports as the
+// bot's username (Discord is the authority on identity). See
+// internal/api/v1/discord.go::SetDiscord.
 func (c *Client) SetDiscord(ctx context.Context, accountID, botToken string, opts ...SetDiscordOptions) (*apiv1.AccountResponse, error) {
-	var o SetDiscordOptions
-	if len(opts) > 0 {
-		o = opts[0]
-	}
+	_ = opts // reserved
 	var out apiv1.AccountResponse
 	err := c.do(ctx, http.MethodPost,
 		fmt.Sprintf("/v1/accounts/%s/discord", accountID),
-		apiv1.SetDiscordRequest{
-			BotToken:    botToken,
-			ForceRename: o.ForceRename,
-		}, &out)
+		apiv1.SetDiscordRequest{BotToken: botToken}, &out)
 	if err != nil {
 		return nil, err
 	}

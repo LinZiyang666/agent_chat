@@ -17,6 +17,7 @@ package discord
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -99,6 +100,7 @@ func (p *Provider) Connect(ctx context.Context) error {
 	s.AddHandler(p.handleReady)
 	s.AddHandler(p.handleMessageCreate)
 	s.AddHandler(p.handleDisconnect)
+	s.AddHandler(p.handleChannelDelete)
 
 	if err := s.Open(); err != nil {
 		p.setStatus(bot.StatusErrored)
@@ -276,9 +278,42 @@ func (p *Provider) SendMessage(_ context.Context, channelID, content string, opt
 
 	msg, e := s.ChannelMessageSendComplex(channelID, send)
 	if e != nil {
-		return nil, errcode.Wrap(e, errcode.Unavailable, "send discord message")
+		return nil, classifyChannelError(e, "send", channelID)
 	}
 	return discordToMessage(msg), nil
+}
+
+// classifyChannelError maps a Discord REST error onto the agentchat
+// errcode space. Most failures are transient (rate limit, gateway
+// hiccup) so the default is UNAVAILABLE; two cases we lift out:
+//
+//   - 10003 "Unknown Channel" / HTTP 404 → NotFound. The channel was
+//     deleted out-of-band in Discord; callers can rely on this code to
+//     stop retrying and react (e.g. archive the matching room).
+//   - HTTP 403 → PermDenied. Bot lost permission on the channel (role
+//     removed, override flipped); retrying won't help either.
+//
+// op is a short verb ("send", "delete", "create") used in the wrapping
+// message so the caller's log line is self-descriptive.
+func classifyChannelError(e error, op, channelID string) error {
+	var rerr *discordgo.RESTError
+	if errors.As(e, &rerr) {
+		if rerr.Message != nil && rerr.Message.Code == discordgo.ErrCodeUnknownChannel {
+			return errcode.Wrap(e, errcode.NotFound,
+				"discord channel %s no longer exists", channelID)
+		}
+		if rerr.Response != nil {
+			switch rerr.Response.StatusCode {
+			case 404:
+				return errcode.Wrap(e, errcode.NotFound,
+					"discord channel %s no longer exists", channelID)
+			case 403:
+				return errcode.Wrap(e, errcode.PermDenied,
+					"discord rejected %s on channel %s (forbidden)", op, channelID)
+			}
+		}
+	}
+	return errcode.Wrap(e, errcode.Unavailable, "%s discord channel", op)
 }
 
 // CreateChannel creates a guild text channel. Requires GuildID via
@@ -299,14 +334,16 @@ func (p *Provider) CreateChannel(_ context.Context, name string) (string, error)
 	return ch.ID, nil
 }
 
-// DeleteChannel removes a channel.
+// DeleteChannel removes a channel. A 404 / Unknown Channel surfaces
+// as errcode.NotFound so the caller can treat "already gone" as a
+// success state for the room-delete flow.
 func (p *Provider) DeleteChannel(_ context.Context, channelID string) error {
 	s, err := p.requireSession()
 	if err != nil {
 		return err
 	}
 	if _, e := s.ChannelDelete(channelID); e != nil {
-		return errcode.Wrap(e, errcode.Unavailable, "delete discord channel")
+		return classifyChannelError(e, "delete", channelID)
 	}
 	return nil
 }
@@ -407,6 +444,21 @@ func (p *Provider) handleDisconnect(_ *discordgo.Session, _ *discordgo.Disconnec
 	p.status = bot.StatusErrored
 	p.mu.Unlock()
 	p.unsafePublish(bot.EventDisconnected{Reason: "gateway closed"})
+}
+
+// handleChannelDelete forwards Discord's out-of-band channel delete
+// to the ingester via the normalized bot.EventChannelDeleted. The
+// downstream ingester archives the matching agentchat room so later
+// reads / sends report a CONFLICT instead of silently 404-ing.
+//
+// Every bot in the guild that observes the channel gets this event
+// from Discord; the ingester is idempotent (archiving an already
+// archived room is a no-op).
+func (p *Provider) handleChannelDelete(_ *discordgo.Session, c *discordgo.ChannelDelete) {
+	if c == nil || c.Channel == nil || c.Channel.ID == "" {
+		return
+	}
+	p.unsafePublish(bot.EventChannelDeleted{ChannelID: c.Channel.ID})
 }
 
 // --- helpers ---

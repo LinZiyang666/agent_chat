@@ -13,47 +13,58 @@ import (
 	"github.com/LinZiyang666/agentchat/internal/errcode"
 )
 
-// M9 Phase 2: SetDiscord verifies bot username via the injected
-// IdentityProber. A username mismatch without --force-rename is a
-// CONFLICT.
-func TestSetDiscordRejectsUsernameMismatch(t *testing.T) {
+// Discord is the authority on bot identity: when Discord-side bot
+// username differs from the local account.name, set-discord snaps the
+// local row to Discord's name (no --force-rename, no CONFLICT). The
+// rename pathway is replaced by "trust Discord and adopt".
+func TestSetDiscordSnapsLocalNameToBotUsername(t *testing.T) {
 	env := newM5Env(t)
-
-	// Stage a mismatched identity for the next token the admin
-	// sends; mock prober returns it instead of the default
-	// "echo hint.Username" behaviour.
 	env.prober.SetIdentity("mismatch-token", bot.Identity{
-		UserID:   "u-someone-else",
-		Username: "someone-else",
+		UserID:   "u-discord-side",
+		Username: "discord-side",
 	})
 
 	resp, body := env.do(http.MethodPost, "/v1/accounts/"+env.adminID+"/discord",
 		apiv1.SetDiscordRequest{BotToken: "mismatch-token"}, env.adminToken)
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
+	var got apiv1.AccountResponse
+	require.NoError(t, json.Unmarshal(body, &got))
+	assert.Equal(t, "discord-side", got.Name,
+		"local account.name must be snapped to Discord's bot username")
+
+	// Daemon must NOT have asked the prober to rename Discord — the
+	// new direction is one-way (Discord -> local).
+	assert.Empty(t, env.prober.RenameCalls(),
+		"set-discord must not call prober.Rename in the new direction")
+
+	stored, err := env.store.Bundle().Accounts.Get(t.Context(), env.adminID)
+	require.NoError(t, err)
+	assert.Equal(t, "discord-side", stored.Name)
+	assert.Equal(t, "u-discord-side", stored.BotUserID)
+}
+
+// When the Discord-reported bot username collides with another
+// agentchat account, the local-name sync hits the unique-name guard
+// and returns CONFLICT (no partial write).
+func TestSetDiscordSnappedNameCollisionConflicts(t *testing.T) {
+	env := newM5Env(t)
+
+	// Make a second account named "taken" so adopting it would clash.
+	resp, body := env.do(http.MethodPost, "/v1/accounts",
+		apiv1.CreateAccountRequest{Name: "taken", Role: "user"}, env.adminToken)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, string(body))
+
+	env.prober.SetIdentity("collision-token", bot.Identity{
+		UserID:   "u-collision",
+		Username: "taken",
+	})
+
+	resp, body = env.do(http.MethodPost, "/v1/accounts/"+env.adminID+"/discord",
+		apiv1.SetDiscordRequest{BotToken: "collision-token"}, env.adminToken)
 	require.Equal(t, http.StatusConflict, resp.StatusCode, string(body))
 	var envErr apiv1.ErrorEnvelope
 	require.NoError(t, json.Unmarshal(body, &envErr))
 	assert.Equal(t, string(errcode.Conflict), envErr.Error.Code)
-}
-
-// M9 Phase 2: with force_rename=true the daemon asks the prober to
-// rename the bot side; mock prober records the call and the next
-// Probe returns the new username.
-func TestSetDiscordForceRenameInvokesProber(t *testing.T) {
-	env := newM5Env(t)
-	env.prober.SetIdentity("rename-token", bot.Identity{
-		UserID:   "u-stale-name",
-		Username: "stale-name",
-	})
-
-	resp, body := env.do(http.MethodPost, "/v1/accounts/"+env.adminID+"/discord",
-		apiv1.SetDiscordRequest{BotToken: "rename-token", ForceRename: true}, env.adminToken)
-	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
-
-	calls := env.prober.RenameCalls()
-	require.Len(t, calls, 1)
-	assert.Equal(t, "rename-token", calls[0].Token)
-	// The root account's name is "root" (see newM5Env bootstrap).
-	assert.Equal(t, "root", calls[0].NewUsername)
 }
 
 // M9 Phase 2: a happy-path set-discord must also persist the probed
@@ -157,38 +168,34 @@ func TestReadRoomCurrentAnnouncementIDPresentWhenEmpty(t *testing.T) {
 		"current_announcement_id must hydrate even when the message slice is empty")
 }
 
-// M9 Phase 2 P3 review fix: --force-rename via the ?force_rename=true
-// query string must work, not just via the body field.
-func TestSetDiscordForceRenameViaQueryString(t *testing.T) {
+// account rename (PATCH /accounts/{id}) pushes the new name to
+// Discord via prober.Rename before updating the local row, when the
+// account has a bot token. Order matters: a Discord rate-limit
+// failure must leave the local row unchanged.
+func TestUpdateAccountRenamePushesToDiscord(t *testing.T) {
 	env := newM5Env(t)
-	env.prober.SetIdentity("query-rename-token", bot.Identity{
-		UserID:   "u-stale",
-		Username: "stale",
-	})
 
-	resp, body := env.do(http.MethodPost,
-		"/v1/accounts/"+env.adminID+"/discord?force_rename=true",
-		// Body intentionally OMITS ForceRename so we exercise the
-		// query-string contract on its own.
-		apiv1.SetDiscordRequest{BotToken: "query-rename-token"}, env.adminToken)
+	// Adopt a bot first so the account has a token to drive the
+	// rename PATCH from.
+	resp, _ := env.do(http.MethodPost, "/v1/accounts/"+env.adminID+"/discord",
+		apiv1.SetDiscordRequest{BotToken: "rename-prep-token"}, env.adminToken)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Drain any prior rename activity so we only see the rename
+	// triggered by the PATCH itself. (RenameCalls() reads-and-resets.)
+	_ = env.prober.RenameCalls()
+
+	newName := "renamed"
+	resp, body := env.do(http.MethodPatch, "/v1/accounts/"+env.adminID,
+		apiv1.UpdateAccountRequest{Name: &newName}, env.adminToken)
 	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
+	var got apiv1.AccountResponse
+	require.NoError(t, json.Unmarshal(body, &got))
+	assert.Equal(t, "renamed", got.Name)
 
 	calls := env.prober.RenameCalls()
-	require.Len(t, calls, 1, "the query-string flag must reach the prober")
-	assert.Equal(t, "root", calls[0].NewUsername)
-}
-
-// Invalid `?force_rename=` values must surface as INVALID_ARGUMENT
-// rather than silently being treated as false.
-func TestSetDiscordForceRenameQueryRejectsBogusValue(t *testing.T) {
-	env := newM5Env(t)
-	resp, body := env.do(http.MethodPost,
-		"/v1/accounts/"+env.adminID+"/discord?force_rename=banana",
-		apiv1.SetDiscordRequest{BotToken: "any"}, env.adminToken)
-	require.Equal(t, http.StatusBadRequest, resp.StatusCode, string(body))
-	var envErr apiv1.ErrorEnvelope
-	require.NoError(t, json.Unmarshal(body, &envErr))
-	assert.Equal(t, string(errcode.InvalidArgument), envErr.Error.Code)
+	require.Len(t, calls, 1, "PATCH must call Discord rename once")
+	assert.Equal(t, "renamed", calls[0].NewUsername)
 }
 
 // M9 Phase 2: --before defaults to 50 (not 10) per design spec §3.3.

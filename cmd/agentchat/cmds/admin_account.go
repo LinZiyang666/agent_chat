@@ -136,10 +136,7 @@ var adminAccountRenameCmd = &cobra.Command{
 	},
 }
 
-var (
-	flagDiscordBotToken    string
-	flagDiscordForceRename bool
-)
+var flagDiscordBotToken string
 
 var adminAccountSetDiscordCmd = &cobra.Command{
 	Use:   "set-discord <id>",
@@ -151,17 +148,16 @@ the plaintext is not echoed back. Bringing the account online (with
 session.
 
 The daemon probes the token against Discord's REST GET /users/@me
-before saving so the account name and the Discord bot's username
-stay in sync (M9 Phase 2). If they don't match the call returns
-CONFLICT; pass --force-rename to ask the daemon to PATCH the bot
-username on the Discord side instead. Discord enforces a per-bot
-username rate limit of 2/h — a UNAVAILABLE response with a
-retry-after hint is the expected failure mode there.`,
+before saving and adopts Discord's view of the bot's identity:
+account.name is snapped to whatever Discord reports as the bot's
+username (Discord is the authority). If the resulting name collides
+with another agentchat account, this call returns CONFLICT — pick a
+different bot, or rename the conflicting account first.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c := newClient()
 		a, err := c.SetDiscord(cmd.Context(), args[0], flagDiscordBotToken,
-			client.SetDiscordOptions{ForceRename: flagDiscordForceRename})
+			client.SetDiscordOptions{})
 		if err != nil {
 			return err
 		}
@@ -246,8 +242,6 @@ func init() {
 	adminAccountSetDiscordCmd.Flags().StringVar(&flagDiscordBotToken, "bot-token", "",
 		"Discord bot token (required; obtain from the Developer Portal)")
 	_ = adminAccountSetDiscordCmd.MarkFlagRequired("bot-token")
-	adminAccountSetDiscordCmd.Flags().BoolVar(&flagDiscordForceRename, "force-rename", false,
-		"when the bot's Discord username doesn't match the account name, rename it via PATCH /users/@me instead of failing with CONFLICT (Discord rate-limits this to 2/h)")
 
 	adminAccountCmd.AddCommand(
 		adminAccountCreateCmd,

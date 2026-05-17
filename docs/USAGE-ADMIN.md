@@ -314,9 +314,11 @@ daemon 出站需要能到：
 >       已设，**且 daemon 已重启过一次让它生效**
 > - [ ] 每个要接入的 agent，都已在 Discord Developer Portal 备好独立 application、
 >       bot、bot token、Privileged Intents 已开、bot 已邀请进 guild（§5）
-> - [ ] **agentchat 账号名 ≡ Discord bot username**（M9 Phase 2 强制）。`set-discord`
->       会用 token 调 Discord REST `GET /users/@me` 校验；不一致 → `CONFLICT`，
->       带 `--force-rename` 时 daemon 自动 PATCH bot username（Discord 限 2/h）
+> - [ ] **Discord 是 bot 身份的权威源**。`set-discord` 用 token 调 Discord REST
+>       `GET /users/@me`，把本地 `account.name` 强制同步到 Discord 报的 bot
+>       username；本地 name 撞别的账号才会 `CONFLICT`。想长期改名：去 Developer
+>       Portal 改 bot 名再 `set-discord`，或者 `agentchat admin account rename`
+>       （内部会调 Discord PATCH /users/@me，Discord 限速 2/h → `UNAVAILABLE`）
 > - [ ] `set-discord` 成功后 `bot_user_id` 已落库——`room invite` 不再要求账号先
 >       online 一次（M9 Phase 2 改进，原 M8 期遗留问题已解）
 
@@ -351,12 +353,13 @@ agentchat admin account create --name agent-alice --role user --json
 ACC=01HZ...   # 上一行返回的 id
 
 # 2. 把 §5.3 第 4 步复制的 Discord bot token 粘进来。
-#    daemon 会调 Discord REST 校验 token 并要求 account name == bot username。
+#    daemon 会调 Discord REST GET /users/@me 拿到 bot username，并把本地
+#    account.name **自动同步**成 Discord 报的名字（Discord 是权威源）。
+#    本地 name 撞别的账号才会 CONFLICT。
 agentchat admin account set-discord "$ACC" --bot-token "MTI3OTM..."
-# 如果 Discord 端 bot username 暂时不叫 agent-alice（比如刚 Reset Token
-# 之前还没改名），加 --force-rename 让 daemon 替你 PATCH：
-#   agentchat admin account set-discord "$ACC" --bot-token "MTI..." --force-rename
-# 提醒：Discord 把 bot username 改名限速 2/h；触限会返 UNAVAILABLE。
+# 如果想让 Discord 那边的 bot 改名跟 agent-alice 一致，反过来用 rename 命令：
+#   agentchat admin account rename "$ACC" --name agent-alice
+#   （账号已 set-discord 时，rename 会先调 Discord PATCH /users/@me；限速 2/h）
 
 # 3. 让账号上线（daemon 内开 Discord WS 连接, 等待 Ready）
 agentchat admin account online "$ACC"
@@ -513,10 +516,10 @@ token 解析优先级：`--token` > `$AGENTCHAT_TOKEN` > `<data-root>/cli.toml` 
 | `agentchat admin account create` | `--name <s>` (必), `--role admin\|user` (默认 `user`) | 新建账号；返回新 id |
 | `agentchat admin account list` | — | 列出全部账号 |
 | `agentchat admin account show <id>` | — | 单个账号详情 |
-| `agentchat admin account rename <id>` | `--name <s>` (必) | 改名 |
+| `agentchat admin account rename <id>` | `--name <s>` (必) | 改名。账号已 `set-discord` 时先调 Discord `PATCH /users/@me` 同步 bot username（限速 2/h → `UNAVAILABLE`，本地不动）；没 bot token 的账号只改本地 |
 | `agentchat admin account set-role <id> <admin\|user>` | — | 改角色 |
 | `agentchat admin account delete <id>` | — | 删账号（连带 token 一并删） |
-| `agentchat admin account set-discord <id>` | `--bot-token <s>` (必), `--force-rename` (可选) | 把 Discord bot token 存进来（AES-GCM 加密落库）。daemon 用 token 调 Discord REST `GET /users/@me` 校验 + 比对 `account.Name == bot.Username`，不一致默认 `CONFLICT`；带 `--force-rename` 则 daemon PATCH bot username（Discord 限 2/h）。`set-discord` 成功后 `bot_user_id` 同步落库 |
+| `agentchat admin account set-discord <id>` | `--bot-token <s>` (必) | 把 Discord bot token 存进来（AES-GCM 加密落库）。daemon 用 token 调 Discord REST `GET /users/@me`，把 `account.name` **自动同步**成 Discord 报的 bot username（Discord 是权威源）；同步后 name 撞别的账号 → `CONFLICT`。`set-discord` 同时把 `bot_user_id` 落库 |
 | `agentchat admin account online <id>` | — | 用绑定的 token 连 Discord，等待 Ready |
 | `agentchat admin account offline <id>` | — | 干净断开 |
 | `agentchat admin account status <id>` | — | 显示 lifecycle state、是否有 bot token、provider 状态、Discord 身份 |
@@ -795,7 +798,7 @@ token = "ac_xxxxxxxxxxxxxxxxxxxxxxx"
 | 单实例 | `<data-root>/agentchatd.lock` flock，第二个 daemon 直接 `CONFLICT` 退出 |
 | HTTP body 上限 | 1 MiB（`PAYLOAD_TOO_LARGE`）；附件单文件 10 MiB（`ATTACHMENT_TOO_LARGE`） |
 | 账号 watch 订阅上限 | 单账号 8 个（`RESOURCE_EXHAUSTED`） |
-| Audit log | 几乎所有写操作都记一行：账号 CRUD、token 签 / 撤、`set-discord`（含 force_rename / bot_user_id / bot_username 元数据）/ `online` / `offline`、room CRUD / invite / kick / subscribe、消息 send / read（`read <room>` 为每条标读消息记一行）、announcement create / read、system_announcement create / read、debug.send。`agentchat admin audit list` 读取（admin only） |
+| Audit log | 几乎所有写操作都记一行：账号 CRUD、token 签 / 撤、`set-discord`（带 `bot_user_id` / `bot_username`；本地 name 被同步过会带 `renamed_local_from`）/ `online` / `offline`、room CRUD / invite / kick / subscribe、消息 send / read（`read <room>` 为每条标读消息记一行）、announcement create / read（auto-archive 时 payload 带 `reason: discord_channel_deleted`）、system_announcement create / read、debug.send。`agentchat admin audit list` 读取（admin only） |
 | token 轮换 | `agentchat admin token create` 签新的，旧的 `agentchat admin token revoke` |
 | bot token 轮换 | Discord Portal `Reset Token` → `agentchat admin account set-discord <id> --bot-token <new>` |
 
@@ -805,8 +808,8 @@ token = "ac_xxxxxxxxxxxxxxxxxxxxxxx"
 |---|---|---|
 | 启动 daemon 立刻退出，提示 `CONFLICT another agentchatd is running` | 同 data-root 已有 daemon，或上次 crash 留下的 lock | `cat <data-root>/agentchatd.lock`（里面是 PID） → `kill <pid>` 或 `rm` 该 lock 文件 |
 | 启动 daemon 报 `CONFLICT socket path ... exists and is not a socket` | socket 路径上有同名普通文件 | daemon 拒绝自动删非 socket 文件以防误删数据；自己 `rm` 后重启 |
-| `agentchat admin account set-discord` 返 `CONFLICT: bot username "X" does not match account name "Y"` | 账号名跟 Discord bot username 不一致（M9 Phase 2 强制） | 选 1：去 Discord Developer Portal 把 bot 改名为 Y；选 2：加 `--force-rename`（daemon 自己 PATCH；2/h 限速）|
-| `agentchat admin account set-discord --force-rename` 返 `UNAVAILABLE: discord rate-limited username rename` | 触了 Discord 2/h 限速 | 等一小时再试，或先在 Portal 手改名 |
+| `agentchat admin account set-discord` 返 `CONFLICT: account name ...` | daemon 把本地 name 同步成 Discord 报的 bot username 时，新 name 撞到另一个账号 | 先把那个冲突的账号 rename / delete，再 `set-discord` |
+| `agentchat admin account rename` 返 `UNAVAILABLE: discord rate-limited` | 账号已 `set-discord`；rename 内部 PATCH 触 Discord 2/h 限速 | 等一小时再试，或先在 Developer Portal 手改名再 `set-discord` |
 | `Error [PAYLOAD_TOO_LARGE]` (exit 22) | HTTP 请求 body 超过 1 MiB | 拆请求；常见于一次塞太多 invite / 巨长公告。**注意这与附件无关**，附件超限是 `ATTACHMENT_TOO_LARGE` |
 | `agentchat ...` 一直 hang | socket 路径不对 / daemon 没起来 | `ls -l <data-root>/agentchatd.sock`；检查 `$AGENTCHAT_HOME` 与 daemon 一致 |
 | `Error [AUTH_MISSING]` | 没设 `AGENTCHAT_TOKEN` 也没 `--token` 也没 `cli.toml` | 重新 `export AGENTCHAT_TOKEN=...`；或确认 `cli.toml` 路径 |

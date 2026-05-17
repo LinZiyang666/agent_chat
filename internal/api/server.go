@@ -81,7 +81,7 @@ func NewRouter(d Deps) http.Handler {
 				r.Post("/accounts", apiv1.CreateAccount(d.Accounts, d.Bundler, d.Audit))
 				r.Get("/accounts", apiv1.ListAccounts(d.Accounts))
 				r.Get("/accounts/{id}", apiv1.GetAccount(d.Accounts))
-				r.Patch("/accounts/{id}", apiv1.UpdateAccount(d.Accounts, d.Bundler, d.Audit))
+				r.Patch("/accounts/{id}", apiv1.UpdateAccount(d.Accounts, d.Bundler, d.Audit, d.MasterKey, d.IdentityProber))
 				r.Delete("/accounts/{id}", apiv1.DeleteAccount(d.Bundler, d.Audit, d.Connector))
 
 				r.Post("/accounts/{id}/tokens", apiv1.CreateToken(d.Bundler, d.Auth, d.Audit))

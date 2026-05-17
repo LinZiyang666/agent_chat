@@ -8,7 +8,9 @@ import (
 	"github.com/LinZiyang666/agentchat/internal/account"
 	"github.com/LinZiyang666/agentchat/internal/audit"
 	"github.com/LinZiyang666/agentchat/internal/auth"
+	"github.com/LinZiyang666/agentchat/internal/bot"
 	"github.com/LinZiyang666/agentchat/internal/connector"
+	"github.com/LinZiyang666/agentchat/internal/crypto"
 	"github.com/LinZiyang666/agentchat/internal/errcode"
 	"github.com/LinZiyang666/agentchat/internal/store"
 )
@@ -90,7 +92,17 @@ func GetAccount(svc *account.Service) http.HandlerFunc {
 // Auditing (M2-P3-003): one account.update entry is recorded per
 // non-empty change set, in the same transaction as the mutation
 // (M2-P3-012 fix). No-op requests skip both writes.
-func UpdateAccount(svc *account.Service, bundler store.Bundler, recorder *audit.Recorder) http.HandlerFunc {
+//
+// Rename flow: when the name actually changes AND the account has a
+// Discord bot token attached, the daemon PATCHes the bot's username
+// via the IdentityProber before the local row is updated. This keeps
+// Discord (the authority) and the local row in sync without forcing
+// the operator to do two steps. Discord's per-bot 2/h rename limit
+// surfaces as UNAVAILABLE; the local row is not changed in that case.
+// Accounts without a bot token rename locally only.
+func UpdateAccount(svc *account.Service, bundler store.Bundler, recorder *audit.Recorder,
+	masterKey []byte, prober bot.IdentityProber,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		var req UpdateAccountRequest
@@ -109,6 +121,48 @@ func UpdateAccount(svc *account.Service, bundler store.Bundler, recorder *audit.
 			roleP = &rr
 		}
 		updateReq := account.UpdateRequest{Name: req.Name, Role: roleP}
+
+		// If we're renaming AND the account has a bot token, push the
+		// rename to Discord first (outside any tx; it's slow REST).
+		// Plan the change once here so we can decide whether to call
+		// out, then re-plan inside the tx to take the canonical path.
+		if req.Name != nil && prober != nil {
+			var (
+				botTokenEnc []byte
+				wantName    string
+				currentName string
+			)
+			if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {
+				current, err := b.Accounts.Get(r.Context(), id)
+				if err != nil {
+					return err
+				}
+				planned, changes, err := svc.PlanUpdate(current, updateReq)
+				if err != nil {
+					return err
+				}
+				currentName = current.Name
+				wantName = planned.Name
+				if currentName != wantName && len(changes) > 0 {
+					botTokenEnc = current.BotTokenEnc
+				}
+				return nil
+			}); err != nil {
+				WriteError(w, err)
+				return
+			}
+			if len(botTokenEnc) > 0 && wantName != currentName {
+				plain, derr := crypto.AESGCMDecrypt(masterKey, botTokenEnc)
+				if derr != nil {
+					WriteError(w, derr)
+					return
+				}
+				if rerr := prober.Rename(r.Context(), string(plain), wantName); rerr != nil {
+					WriteError(w, rerr)
+					return
+				}
+			}
+		}
 
 		var updated *store.Account
 		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {

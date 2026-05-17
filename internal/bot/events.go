@@ -40,3 +40,14 @@ type EventMessageNew struct {
 }
 
 func (EventMessageNew) isEvent() {}
+
+// EventChannelDeleted is emitted when a Discord channel the bot can
+// observe is deleted out-of-band (e.g. a human pressed "Delete
+// Channel" in the Discord client). The ingester uses this to archive
+// the matching agentchat room so subsequent reads / sends see a
+// CONFLICT instead of silently failing against a 404.
+type EventChannelDeleted struct {
+	ChannelID string
+}
+
+func (EventChannelDeleted) isEvent() {}

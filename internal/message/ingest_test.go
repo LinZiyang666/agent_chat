@@ -346,3 +346,49 @@ func TestResolveAuthorEmptyDiscordUserID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
+
+// --- ChannelDelete (auto-archive) ---
+
+// A known room whose channel disappears in Discord gets archived in
+// the same flow that observes the EventChannelDeleted. Repeated
+// events (every bot in the guild sees the delete) are idempotent.
+func TestIngestChannelDeletedArchivesRoom(t *testing.T) {
+	f := newFixture(t)
+	room := f.createRoom("doomed", "ch-doomed")
+
+	require.NoError(t, f.ing.ingestChannelDeleted("ingester-acc",
+		bot.EventChannelDeleted{ChannelID: "ch-doomed"}))
+
+	got, err := f.store.Bundle().Rooms.Get(context.Background(), room.ID)
+	require.NoError(t, err)
+	assert.True(t, got.Archived, "room must be archived after channel delete")
+
+	// Second delivery — must be a no-op, not an error.
+	require.NoError(t, f.ing.ingestChannelDeleted("other-bot",
+		bot.EventChannelDeleted{ChannelID: "ch-doomed"}))
+	got, err = f.store.Bundle().Rooms.Get(context.Background(), room.ID)
+	require.NoError(t, err)
+	assert.True(t, got.Archived)
+
+	// And an audit row was written (room.archive with our reason).
+	entries, err := f.store.Bundle().Audit.List(context.Background(), store.AuditFilter{})
+	require.NoError(t, err)
+	var saw bool
+	for _, e := range entries {
+		if e.Action == "room.archive" && e.Target == room.ID {
+			saw = true
+			assert.Contains(t, e.Payload, "discord_channel_deleted")
+			assert.Contains(t, e.Payload, "ch-doomed")
+		}
+	}
+	assert.True(t, saw, "expected a room.archive audit row")
+}
+
+// Deleting a Discord channel agentchat never owned is a silent no-op
+// (other bots in the same guild also get this event).
+func TestIngestChannelDeletedUnknownChannelIsNoOp(t *testing.T) {
+	f := newFixture(t)
+	err := f.ing.ingestChannelDeleted("ingester-acc",
+		bot.EventChannelDeleted{ChannelID: "ch-not-ours"})
+	require.NoError(t, err)
+}

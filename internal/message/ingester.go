@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/LinZiyang666/agentchat/internal/audit"
 	"github.com/LinZiyang666/agentchat/internal/bot"
 	"github.com/LinZiyang666/agentchat/internal/connector"
 	"github.com/LinZiyang666/agentchat/internal/errcode"
@@ -117,12 +118,91 @@ func (i *Ingester) dispatch(accountID string, ev bot.Event) {
 				"discord_msg_id", e.Message.ID,
 				"err", err)
 		}
+	case bot.EventChannelDeleted:
+		if err := i.ingestChannelDeleted(accountID, e); err != nil {
+			i.log.Warn("ingest channel_deleted failed",
+				"account_id", accountID,
+				"discord_channel_id", e.ChannelID,
+				"err", err)
+		}
 	default:
 		// Other event types (EventConnected, EventDisconnected, etc.)
 		// are not persisted by the ingester. The Connector's subscription
 		// fan-out still delivers them to /v1/debug/events consumers; we
 		// just drop them here.
 	}
+}
+
+// ingestChannelDeleted handles a Discord-originated channel delete
+// (someone removed the channel out-of-band in the Discord client).
+// We look up the matching room by discord_channel_id and archive it
+// so subsequent reads / sends fail with a meaningful CONFLICT
+// instead of letting the send path explode into "Unknown Channel"
+// 404s wrapped as UNAVAILABLE.
+//
+// Idempotent: archiving an already-archived room is a no-op; rooms
+// unknown to agentchat (e.g. someone deleted a channel we never
+// owned) are silently ignored. Every bot in the guild gets this
+// event from Discord, so repeated calls across accounts are
+// expected and harmless.
+func (i *Ingester) ingestChannelDeleted(accountID string, e bot.EventChannelDeleted) error {
+	if e.ChannelID == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var (
+		archivedID string
+		notify     []string
+	)
+	if err := i.bundler.WithTx(ctx, func(b store.Bundle) error {
+		room, err := b.Rooms.GetByDiscordChannelID(ctx, e.ChannelID)
+		if err != nil {
+			if ec, _ := errcode.As(err); ec != nil && ec.Code == errcode.NotFound {
+				return nil
+			}
+			return err
+		}
+		if room.Archived {
+			return nil
+		}
+		room.Archived = true
+		room.UpdatedAt = time.Now().UTC()
+		if err := b.Rooms.Update(ctx, room); err != nil {
+			return err
+		}
+		archivedID = room.ID
+
+		if err := audit.NewRecorder(b.Audit).RecordVia(ctx, b.Audit, accountID,
+			audit.ActionRoomArchive, room.ID, map[string]any{
+				"reason":             "discord_channel_deleted",
+				"discord_channel_id": e.ChannelID,
+			}); err != nil {
+			return err
+		}
+
+		members, err := b.Memberships.ListByRoom(ctx, room.ID)
+		if err != nil {
+			return err
+		}
+		ids := make([]string, 0, len(members))
+		for _, m := range members {
+			ids = append(ids, m.AccountID)
+		}
+		notify = ids
+		return nil
+	}); err != nil {
+		return err
+	}
+	if archivedID != "" {
+		i.log.Info("auto-archived room: discord channel deleted",
+			"account_id", accountID,
+			"room_id", archivedID,
+			"discord_channel_id", e.ChannelID)
+		i.bus.PublishMany(notify)
+	}
+	return nil
 }
 
 // ingestNew is the per-event critical section. The persistence (room

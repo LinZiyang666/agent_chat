@@ -3,7 +3,6 @@ package v1
 import (
 	"context"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -22,12 +21,6 @@ import (
 // SetDiscordRequest is the body of POST /v1/accounts/{id}/discord.
 type SetDiscordRequest struct {
 	BotToken string `json:"bot_token"`
-	// ForceRename, when true, asks the daemon to rename the Discord
-	// bot user to the agentchat account.Name if the two don't match
-	// (M9 Phase 2). Without this flag, a mismatch returns CONFLICT.
-	// Discord enforces a per-bot username rate limit (2/h); the
-	// daemon surfaces UNAVAILABLE if the rename is rejected.
-	ForceRename bool `json:"force_rename,omitempty"`
 }
 
 // StatusResponse is the body of GET /v1/accounts/{id}/status.
@@ -61,30 +54,27 @@ func SetDiscord(bundler store.Bundler, recorder *audit.Recorder, masterKey []byt
 			WriteError(w, errcode.New(errcode.InvalidArgument, "bot_token is empty"))
 			return
 		}
-		// M9 Phase 2 design (docs/06-cli-redesign.md §6.2): the
-		// `force_rename` toggle is reachable via either the JSON
-		// body field OR a `?force_rename=true` query string. Accept
-		// both — body wins when both are set, but a true on either
-		// channel enables the rename branch.
-		if q := r.URL.Query().Get("force_rename"); q != "" {
-			if v, err := strconv.ParseBool(q); err != nil {
-				WriteError(w, errcode.New(errcode.InvalidArgument,
-					"force_rename must be a boolean (true|false|1|0); got %q", q))
-				return
-			} else if v {
-				req.ForceRename = true
-			}
-		}
 		actor, ok := auth.AccountFromContext(r.Context())
 		if !ok {
 			WriteError(w, errcode.New(errcode.Internal, "no actor in context"))
 			return
 		}
 
-		// Fetch the target account up-front (outside the write tx) so
-		// the prober knows what account.Name to match against. Failing
-		// here surfaces NotFound to the admin before we go bother
-		// Discord.
+		// Discord is the authority on bot identity. Probe the token
+		// first so we learn the bot's snowflake + username before any
+		// local writes; if the local account.Name diverges from the
+		// Discord-side username we'll snap the local name to match
+		// inside the write tx below.
+		//
+		// The real Discord prober ignores the hint (GET /users/@me is
+		// fully self-describing); the mock prober used by tests echoes
+		// hint.Username as the default when no override is staged, so
+		// we still pass account.Name through to keep test fixtures
+		// well-defined.
+		//
+		// Test rigs without a prober skip identity-sync entirely (just
+		// persist the encrypted token); production deps always inject
+		// one — see cmd/agentchatd/cmds/serve.go.
 		var accountName string
 		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {
 			a, err := b.Accounts.Get(r.Context(), id)
@@ -97,23 +87,9 @@ func SetDiscord(bundler store.Bundler, recorder *audit.Recorder, masterKey []byt
 			WriteError(w, err)
 			return
 		}
-
-		// M9 Phase 2: probe the token against the platform BEFORE
-		// persisting. This pins down two invariants the outbound
-		// @<name> parser depends on:
-		//   1. account.Name == bot.Username (so `@alice` in content
-		//      reliably refers to the Discord-side identity alice).
-		//   2. accounts.bot_user_id is populated, so the ingester /
-		//      send path can map between snowflake and account_id
-		//      without an extra round-trip through OnlineAccount.
-		// If the daemon has no prober wired in (mock test rigs that
-		// haven't migrated yet), fall back to the legacy behaviour:
-		// just persist the encrypted token. Production deps always
-		// inject one — see cmd/agentchatd/cmds/serve.go.
 		var (
-			probed         bot.Identity
-			usingProber    = prober != nil
-			didForceRename bool
+			probed      bot.Identity
+			usingProber = prober != nil
 		)
 		if usingProber {
 			id1, perr := prober.Probe(r.Context(), req.BotToken, bot.Identity{Username: accountName})
@@ -122,20 +98,6 @@ func SetDiscord(bundler store.Bundler, recorder *audit.Recorder, masterKey []byt
 				return
 			}
 			probed = id1
-			if probed.Username != accountName {
-				if !req.ForceRename {
-					WriteError(w, errcode.New(errcode.Conflict,
-						"bot username %q does not match account name %q; rename the bot on the Discord developer portal or retry with force_rename=true",
-						probed.Username, accountName))
-					return
-				}
-				if rerr := prober.Rename(r.Context(), req.BotToken, accountName); rerr != nil {
-					WriteError(w, rerr)
-					return
-				}
-				didForceRename = true
-				probed.Username = accountName
-			}
 		}
 
 		enc, err := crypto.AESGCMEncrypt(masterKey, []byte(req.BotToken))
@@ -143,7 +105,11 @@ func SetDiscord(bundler store.Bundler, recorder *audit.Recorder, masterKey []byt
 			WriteError(w, err)
 			return
 		}
-		var updated *store.Account
+		var (
+			updated    *store.Account
+			nameSynced bool
+			oldName    string
+		)
 		if err := bundler.WithTx(r.Context(), func(b store.Bundle) error {
 			a, err := b.Accounts.Get(r.Context(), id)
 			if err != nil {
@@ -151,11 +117,16 @@ func SetDiscord(bundler store.Bundler, recorder *audit.Recorder, masterKey []byt
 			}
 			a.BotTokenEnc = enc
 			a.UpdatedAt = time.Now().UTC()
-			// Persist the bot_user_id so the ingester's mention
-			// resolver and `room invite` don't have to wait for the
-			// first OnlineAccount call to learn it (M9 Phase 2).
 			if usingProber && probed.UserID != "" {
 				a.BotUserID = probed.UserID
+			}
+			// Snap local name to whatever Discord says. If the new
+			// name collides with another account, Accounts.Update
+			// returns CONFLICT (the unique-name guard).
+			if usingProber && probed.Username != "" && probed.Username != a.Name {
+				oldName = a.Name
+				a.Name = probed.Username
+				nameSynced = true
 			}
 			if err := b.Accounts.Update(r.Context(), a); err != nil {
 				return err
@@ -165,8 +136,8 @@ func SetDiscord(bundler store.Bundler, recorder *audit.Recorder, masterKey []byt
 			if usingProber {
 				payload["bot_user_id"] = probed.UserID
 				payload["bot_username"] = probed.Username
-				if didForceRename {
-					payload["force_rename"] = true
+				if nameSynced {
+					payload["renamed_local_from"] = oldName
 				}
 			}
 			if len(payload) == 0 {
