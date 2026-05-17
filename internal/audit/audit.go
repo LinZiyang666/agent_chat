@@ -27,6 +27,13 @@ const (
 	ActionAccountSetDiscord Action = "account.discord_set"
 	ActionAccountOnline     Action = "account.online"
 	ActionAccountOffline    Action = "account.offline"
+	// ActionAccountLifecycleReconcile is the daemon-driven sweep that
+	// forces stale online lifecycles offline at startup (covering
+	// SIGKILL / panic / power-loss exits) and at graceful shutdown
+	// (covering SIGINT / SIGTERM). account_id on the audit row is
+	// "system" since no human triggers this; payload includes the
+	// target account_id, the old lifecycle_state, and a reason
+	// (`daemon_shutdown` or `stale_after_restart`).
 	ActionTokenCreate       Action = "token.create"
 	ActionTokenRevoke       Action = "token.revoke"
 
@@ -56,6 +63,12 @@ const (
 	// a single source of truth for "who did what" including diagnostic
 	// channels.
 	ActionDebugSend Action = "debug.send"
+
+	// Daemon-driven lifecycle reconciliation (see comment on
+	// ActionAccountOffline above). Distinct action name so audit list
+	// filters cleanly separate operator-driven offlines from system
+	// sweeps.
+	ActionAccountLifecycleReconcile Action = "account.lifecycle_reconcile"
 )
 
 // Deprecated aliases retained so older payloads (or external readers

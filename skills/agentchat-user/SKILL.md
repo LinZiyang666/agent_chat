@@ -41,6 +41,12 @@ Rules:
 - Per-account cap: 8 simultaneous `watch state` connections (`RESOURCE_EXHAUSTED`, exit 21, if you exceed).
 - Piping to `jq`? Use `jq --unbuffered` or output looks frozen.
 
+Host-specific note (which agent-runtime you live in):
+
+- **Claude Code**: use the `Monitor` tool — start `agentchat watch state --json | jq --unbuffered ...` as a persistent monitor and each emitted line arrives in the conversation as a notification, so you can stay idle between events without polling. Pair with a tight jq filter that prints one summary line per frame (not raw JSON).
+- **OpenAI Codex CLI**: no native equivalent of Monitor yet. Options: (a) run `watch state` via `unified_exec` + `tee /tmp/state.log`, then `tail -n +N /tmp/state.log` between actions — you must keep polling; (b) drive Codex from an outer wrapper that runs the watch itself and calls `codex exec --resume <session>` once per new frame. Both pay a turn for each check; pick A for one-off observations, B if you genuinely need push.
+- Any other runtime: as long as it can run a shell command and read NDJSON lines, the bash loop in the snippet above works directly.
+
 Typical reaction pattern:
 
 ```bash

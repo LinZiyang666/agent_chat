@@ -16,6 +16,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/google/uuid"
+
 	"github.com/LinZiyang666/agentchat/internal/account"
 	"github.com/LinZiyang666/agentchat/internal/api"
 	"github.com/LinZiyang666/agentchat/internal/attachment"
@@ -29,6 +31,7 @@ import (
 	"github.com/LinZiyang666/agentchat/internal/errcode"
 	"github.com/LinZiyang666/agentchat/internal/message"
 	"github.com/LinZiyang666/agentchat/internal/state"
+	"github.com/LinZiyang666/agentchat/internal/store"
 	"github.com/LinZiyang666/agentchat/internal/store/sqlite"
 )
 
@@ -144,6 +147,14 @@ func runServe(ctx context.Context) error {
 		return err
 	}
 
+	// Startup reconciliation: any account whose lifecycle_state is
+	// "online" right after daemon boot must be stale — the previous
+	// process exited (cleanly or via SIGKILL / panic / power loss)
+	// without anyone having brought it online again. Snap all such
+	// rows to offline and audit the sweep so operators can see what
+	// happened across restarts.
+	reconcileStaleOnlineLifecycles(ctx, db, log, "stale_after_restart")
+
 	if err := removeStaleSocket(cfg.SocketPath); err != nil {
 		return err
 	}
@@ -205,9 +216,72 @@ func runServe(ctx context.Context) error {
 		if err := srv.Shutdown(ctx2); err != nil {
 			log.Warn("graceful shutdown failed", "err", err)
 		}
+		// Shutdown reconciliation: HTTP is closed, no new online
+		// requests can land. Force every online account offline in
+		// SQLite so the lifecycle field reflects the daemon's true
+		// state on disk. Discord-side disconnect runs in the deferred
+		// conn.Shutdown right after we return.
+		reconcileStaleOnlineLifecycles(ctx2, db, log, "daemon_shutdown")
 		return nil
 	case err := <-errCh:
 		return err
+	}
+}
+
+// reconcileStaleOnlineLifecycles walks accounts whose lifecycle_state
+// is currently "online" and forces each to "offline", writing one
+// audit row per change. The sweep is daemon-driven (no operator), so
+// audit.account_id is the literal "system" and payload carries
+// {old_state, reason} for traceability.
+//
+// Called at two distinct moments:
+//   - daemon boot: any "online" row at startup must be stale (no
+//     provider has been (re)started yet), so we clean it up.
+//   - graceful shutdown (SIGINT / SIGTERM): we still hold all in-memory
+//     providers but every account is about to go silent; flip the DB
+//     so a restart-and-`whoami` sequence does not mislead operators.
+//
+// SIGKILL / panic / power-loss exits skip the shutdown branch and are
+// covered by the boot-time branch on the next start.
+func reconcileStaleOnlineLifecycles(ctx context.Context, db store.Bundler, log *slog.Logger, reason string) {
+	if err := db.WithTx(ctx, func(b store.Bundle) error {
+		accounts, err := b.Accounts.List(ctx)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		for _, a := range accounts {
+			if a.LifecycleState != store.LifecycleOnline {
+				continue
+			}
+			oldState := a.LifecycleState
+			a.LifecycleState = store.LifecycleOffline
+			a.UpdatedAt = now
+			if err := b.Accounts.Update(ctx, a); err != nil {
+				return err
+			}
+			id, err := uuid.NewV7()
+			if err != nil {
+				return errcode.Wrap(err, errcode.Internal, "uuidv7 for reconcile audit")
+			}
+			payload := fmt.Sprintf(`{"old_state":%q,"reason":%q}`, oldState, reason)
+			if err := b.Audit.Record(ctx, &store.AuditEntry{
+				ID:        id.String(),
+				AccountID: "system",
+				Action:    string(audit.ActionAccountLifecycleReconcile),
+				Target:    a.ID,
+				Payload:   payload,
+				CreatedAt: now,
+			}); err != nil {
+				return err
+			}
+			log.Info("reconciled stale online lifecycle",
+				"account_id", a.ID, "old_state", oldState, "reason", reason)
+		}
+		return nil
+	}); err != nil {
+		log.Warn("reconcile stale online lifecycles failed",
+			"reason", reason, "err", err)
 	}
 }
 
