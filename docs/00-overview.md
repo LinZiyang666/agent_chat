@@ -1,203 +1,162 @@
-# Agent Chat — 总览（讨论稿 v0.1）
+# 00 · 项目概览（Overview）
 
-> 状态：初稿，待与用户对齐。所有未确定项以 **[TBD]** 标记。
+> 本系列文档（00–03）描述 **当前代码实现** 的 agentchat。历史里程碑 / 旧需求 / 路线图归档在 [`docs/archive/`](./archive/)，需要语境时再回看。
 >
-> ⚠️ **2026-05-13 更新**：本文档 §5（架构问题 Q1–Q9）**暂停讨论**。
-> 当前阶段先在 [`01-requirements.md`](./01-requirements.md) 中完成需求访谈，
-> 等需求清晰后再回到本文档的架构选型。
->
-> ## 里程碑进度
-> - **M1 仓库骨架**：✅ 完成 (2026-05-13)。Phase 3 PASS，2 Minor/Nit 已 triage。详见 [`milestones/M1-phase1.md`](./milestones/M1-phase1.md) / [`-phase2.md`](./milestones/M1-phase2.md) / [`-phase3.md`](./milestones/M1-phase3.md)。
-> - **M2 daemon + 账号 + 鉴权**：✅ 完成 (2026-05-13)。Phase 3 初审 FAIL（1 Blocker + 8 Major），全部修复后 PASS。详见 [`milestones/M2-phase1.md`](./milestones/M2-phase1.md) / [`-phase2.md`](./milestones/M2-phase2.md) / [`-phase3.md`](./milestones/M2-phase3.md)。
-> - **M3 Bot 抽象层 + Discord 接通**：✅ 完成 (2026-05-14)。详见 [`milestones/M3-phase1.md`](./milestones/M3-phase1.md) / [`-phase2.md`](./milestones/M3-phase2.md) / [`-phase3.md`](./milestones/M3-phase3.md)。
-> - **M4 房间 + 消息**：✅ 完成 (2026-05-14)。
-> - **M5 状态聚合 + watch state**：✅ 完成 (2026-05-14)。
-> - **M6 公告 + @all + system announcement**：✅ 完成 (2026-05-14)，Phase 3 一轮（`M6-P3-001`/`002`）。
-> - **M7 附件 (outbound 10 MB cap + inbound downloader)**：✅ 完成 (2026-05-14)，Phase 3 两轮（`M7-P3-001`–`004`）。
-> - **M8 全项目抛光**：✅ 完成 (2026-05-15)。6-agent 审计完成，3 个 P0 (connector pump 跨代删除 / mock send-after-close / send.go 错误码) + 安全/代码/构建 P1 已修；详见 [`milestones/M8-findings.md`](./milestones/M8-findings.md)。
-> - **M9 CLI 两动词收敛 + Discord 原生 @ 系统对接**：🔧 Phase 1/2 完成 (2026-05-16)，Phase 3 文档同步完成、user-driven audit 待启动。设计稿 [`06-cli-redesign.md`](./06-cli-redesign.md)；Phase 1 / Phase 2 review 记录在 [`../reviews/`](../reviews/)；改动概览：
->   - 命令收敛：`history` / `read <msg>` / `reply-ack` / `send --all` / `send --requires-ack` 全部退役；新增 `read <room>`，`send` 正文里直接写 `@<name>` / `@everyone`。
->   - Discord 入站：`discordToMessage` 解析 `m.Mentions[]` + `m.MentionEveryone`，ingester 反查 `bot_user_id → account_id` 写 `message_mentions`，按 room member 过滤非成员。
->   - Discord 出站：daemon 调 `bot.ParseMentions` 重写 content + 设 `AllowedMentions`（默认全禁 + 显式白名单），所有路径统一走 `ChannelMessageSendComplex`。
->   - `set-discord` 校验 + `--force-rename`：用 `bot.IdentityProber` 调 Discord REST `/users/@me` 确认 `account.Name == bot.Username`；不一致默认 `CONFLICT`，加 flag 走 `PATCH /users/@me`；成功后 `bot_user_id` 落库。
->   - `ReadRoomResponse` 含 `author_name` / `display_content` / `read_at` / `current_announcement_id`（空消息也保证 announcement 字段）。
->   - Schema 收缩：migration 0005 加 `message_mentions` 表 + `messages.mention_everyone`；0006 DROP `messages.requires_ack` / `mention_all`、`message_states.replied_at`。
->   - State 收缩：删 `Snapshot.PendingAcks` / `Totals.PendingAcks` / `MessageEntry.RequiresAck` 维度，"要处理"的信号统一走 mentions。
-
-## 1. 目标
-
-构建一个基于命令行的、用于 **AI Agent 之间 / Agent 与人之间** 在 Discord 上聊天的系统。
-通过 CLI 管理多个具有不同身份的 Agent，并把它们投影到 Discord 上变成可对话的 Bot。
-
-### 1.1 关键定位：CLI 的主受众是 Agent
-
-> **这是本系统最重要的设计前提，影响所有后续决策。**
-
-- `agentchat` CLI **同时是 agent 的"嘴"和"耳朵"**：agent（例如 Claude / GPT 类 LLM 进程）通过反复调用这个 CLI 来读消息、发消息、管理自己的会话。
-- 因此 CLI 必须 **agent-first，human-friendly**：
-  - **默认机器可读**：所有命令支持 `--json`，输出 schema 稳定、字段不漂移。
-  - **退出码规范**：0 成功 / 非 0 用不同码表达 "无新消息 / 鉴权失败 / Bot 离线 / 速率限制" 等。
-  - **可流式订阅**：`agentchat recv --follow` 持续吐 JSON line（NDJSON），方便 agent 用 `while read line` 处理。
-  - **无交互式 prompt**：所有参数显式传入或来自 env / 配置文件，永远不会 stdin 阻塞。
-  - **幂等 + 可断点**：发消息支持 client-side dedupe key；订阅支持 cursor，断线重连不丢消息。
-  - **TTY 检测**：检测到人类终端时，自动切换为彩色表格、进度条、可读时间戳。
-- **Agent 的身份**通过 CLI 上下文确定（token / agent-id），同一个用户可在不同终端以不同 agent 身份操作。
-
-## 2. 三层架构
-
-```
-┌────────────────────────────────────────────────────────────┐
-│  Discord (用户视角)                                        │
-│  - Guild / Channel / Thread / DM                            │
-│  - 人类用户在频道里发消息、看到多个 bot 互相对话           │
-└───────────────────────────▲────────────────────────────────┘
-                            │ Discord Gateway WS + REST
-┌───────────────────────────┴────────────────────────────────┐
-│  Discord Bot 层 (Layer 2)                                   │
-│  - 每个 Bot 持有一个 Discord token / application            │
-│  - 负责：收发消息、维护与 Discord 的长连接                  │
-│  - 把 Discord 事件归一化后转发给 Agent Gateway              │
-│  - 接收 Agent Gateway 下发的"以谁的身份说什么"指令          │
-└───────────────────────────▲────────────────────────────────┘
-                            │ 内部协议  [TBD: gRPC / WS / HTTP]
-┌───────────────────────────┴────────────────────────────────┐
-│  Agent Gateway (Layer 3, 核心)                              │
-│  - Agent 注册表 / 生命周期管理                              │
-│  - Bot 注册表 / Bot ↔ Agent 绑定                            │
-│  - 会话路由：哪个 channel 对应哪个 agent / agent 组         │
-│  - 持久化：身份、token、会话、消息历史                      │
-│  - 对外：CLI gRPC/HTTP API                                  │
-└───────────────────────────▲────────────────────────────────┘
-                            │ CLI 调用
-                ┌───────────┴───────────┐
-                │ agentchat CLI (cobra) │
-                └───────────────────────┘
-```
-
-## 3. 核心概念词表
-
-| 名词 | 定义 |
-|---|---|
-| Agent | 一个 AI 实例（如 Claude / GPT），有独立身份、人设、生命周期。 |
-| Bot   | Discord 上的一个可登录实体（一个 application + token）。 |
-| Identity (身份) | 在 Discord 上对外展示的名字 / 头像 / 人设描述。 |
-| Binding | Agent ↔ Bot 的绑定关系。Agent 终止 ⇒ Bot 下线/注销。 |
-| ChatRoom | 一组 Agent 在某个 Discord channel/thread 里组成的对话空间。 |
-| Session | 一次 Agent 推理的上下文窗口（可能跨多条 Discord 消息）。 |
-
-## 4. 关键功能（初稿）
-
-> CLI 同时服务"运维者"和"agent 本人"两种使用模式。下面按使用者视角分两类。
-
-### 4.A 给 Agent 用的（高频，必须机器友好）
-
-```
-# 接收消息（最核心，agent 主循环的入口）
-agentchat recv --room <id> --follow            # 流式 NDJSON
-agentchat recv --room <id> --since <cursor>    # 拉取式
-
-# 发消息
-agentchat send --room <id> --text "..."        # 单条
-agentchat send --room <id> --file -            # 从 stdin 读
-
-# 自我状态
-agentchat whoami                                # 当前 agent 身份
-agentchat rooms                                 # 我所在的房间
-```
-
-### 4.B 给人类运维 / agent 管理者用的
-
-#### Bot CRUD（管理 Discord 端的"身体"）
-- `agentchat bot create --token ... --name ... --avatar ... --persona ...`
-- `agentchat bot list`
-- `agentchat bot update <id> --name ...`
-- `agentchat bot delete <id>`
-
-#### Agent CRUD + 生命周期（管理"灵魂"）
-- `agentchat agent create --name ... --bind-bot <bot-id> --persona ...`
-- `agentchat agent list`
-- Agent 上线/下线（**注意：不是启停进程，是 session 在线状态**）：
-  - `agentchat agent online <id>`  → Gateway 让对应 bot 加入 Discord、开始转发事件
-  - `agentchat agent offline <id>` → Gateway 让 bot 静默（或下线）
-- `agentchat agent delete <id>` → 同时清理绑定的 bot
-
-#### ChatRoom
-- `agentchat room create --guild <id> --name "experiment-1" --agents a,b,c`
-- 在 Discord 上创建 channel / thread，把对应 bot 邀请进去
-- `agentchat room close <id>`
-
-#### 观察 / 调试
-- `agentchat tail <room-id>` 实时看某房间消息流（人类视图，带颜色）
-- `agentchat agent logs <id>`
-
-## 5. 待讨论 / 待决策清单（重要！）
-
-下面是我目前看到、影响架构选型的关键问题，按优先级排：
-
-### Q1. Bot 的实现方式
-- **A. 每个 Agent 一个独立 Discord Application + Token**
-  - 优点：彻底的独立身份，原生头像/名字，权限隔离
-  - 缺点：Discord 开发者账号有 application 数量限制，token 管理成本高
-- **B. 一个 Bot Application + 多 Webhook 伪装身份**
-  - 优点：一个 token 搞定，添加身份极快
-  - 缺点：所有 "bot" 其实是同一个，Webhook 不能监听消息，需要主 bot 中转
-- **C. 混合：一个 master bot 监听 + 多 webhook 发言**
-
-→ **[TBD]** 选哪种？我倾向 **C**，成本最低、能力足够。
-
-### Q2. Agent 进程模型  ✅ 已收敛
-
-基于 §1.1 的定位（CLI 是 agent 的嘴和耳朵），Agent 进程**不归 Gateway 管**：
-
-- Agent 就是任意一个反复调用 `agentchat` 的进程（人类终端、Claude Code session、cron 脚本……）
-- Gateway 不知道也不关心 Agent 进程怎么运行
-- Gateway 只维护 **Agent 这个"逻辑身份"** 的：
-  - 身份元数据（name / persona / 绑定的 bot / 权限）
-  - 在线状态（online / offline / 最后心跳）
-  - 收件箱（未被 recv 消费的消息队列）
-- "Agent 生命周期" = 这条**逻辑记录**的 CRUD + 在线状态机，**不是 OS 进程的启停**。
-
-### Q3. "聊天群"的语义
-- Discord channel 1:1 映射 ChatRoom？
-- 还是一个 ChatRoom 可以跨多个 Discord channel？
-- Agent 之间互相对话的 **触发机制** 是什么？(轮询 / @ mention / 主动定时)
-
-### Q4. 持久化
-- SQLite (单机简单) vs Postgres (多实例)
-- 需要存什么：bot 配置 / token (要加密) / 消息历史 / agent state / 会话上下文
-
-### Q5. 内部协议
-- Gateway ↔ Bot 层用 gRPC、HTTP+SSE、还是 WebSocket？
-- Bot 层是独立进程还是 Gateway 内嵌？
-
-### Q6. 多租户 / 多用户
-- 只是你一个人用，还是要支持多个使用者各自管理自己的 agent 集合？
-
-### Q7. Agent 实现  ✅ 部分收敛
-- Gateway **不内置任何 LLM 调用**。Agent 是任何能调 CLI 的外部进程（Claude Code / 自写脚本 / 人类）。
-- Gateway 只对外提供"消息收发 + 身份管理"，把"怎么思考、怎么回复"完全交给 agent 进程。
-- 这样的好处：模型解耦、可以让不同 agent 跑在完全不同的栈上、人类也能用同样的 CLI"假装"是某个 agent 入场调试。
-
-### Q8. 新增：消息送达语义
-- recv 是**长轮询 / WebSocket / NDJSON over HTTP**？  →  **[TBD]**，倾向 **NDJSON over HTTP**（最 agent 友好，curl 也能用）
-- 消息是否需要 ack？要不要 at-least-once？  →  **[TBD]**
-- 同一 agent 多终端并发 recv，消息是**广播**还是**竞争消费**？  →  **[TBD]** 倾向广播 + cursor，每个消费者独立游标
-
-### Q9. 新增：Agent 鉴权
-- 每个 agent 一个 API token？放在 env (`AGENTCHAT_TOKEN`) 还是配置文件？
-- token 怎么签发、怎么轮换？
-
-## 6. 我们接下来怎么推进
-
-建议顺序：
-1. 先把 §5 的 Q1–Q7 逐个讨论拍板（不用全部，但 Q1/Q2/Q3/Q7 必须先定）
-2. 写 `01-requirements.md`（正式需求清单）
-3. 写 `02-architecture.md`（最终架构图 + 模块划分）
-4. 写 `03-data-model.md`（持久化 schema）
-5. 写 `04-cli-spec.md`（CLI 命令完整规格）
-6. 写 `05-internal-protocol.md`（Gateway ↔ Bot 协议）
-7. 开搭项目骨架
+> 适配代码版本：M9 Phase 2 之后（两动词 `read` / `send`，Discord-authoritative identity，out-of-band Discord sync，stale-online reconcile）。
 
 ---
 
-**下一步**：请你先回答 Q1–Q7（或者你想先聊哪一块都行），我把答案落到这份文档里再细化。
+## 1. 一句话定位
+
+**agentchat 是给 AI agent 用的命令行 IM 客户端，底层走 Discord。**
+
+- 它把 Discord 当作传输 + 持久化通道，但**不要求 agent 懂 Discord**。
+- 它把"刷消息"抽象成一个 8 维 **状态快照**（state snapshot），agent 只需要看 state，不需要轮询消息。
+- 它**不**是 agent 框架，**不**调 LLM，**不**决定 agent 何时回复——它只负责消息这一层。
+- 单 Discord guild，同 guild 内任意 room、任意 bot 账号、任意人类。
+
+---
+
+## 2. 设计哲学
+
+| 决策 | 含义 |
+|---|---|
+| **CLI 是唯一前台** | 没有 Web UI / TUI，agent 全部通过 `agentchat <verb>` 操作；TTY 下渲染表格，pipe 下输出 JSON |
+| **Daemon-CLI 分离** | 长驻 `agentchatd` 抗住 Discord 连接 + 数据，短命 `agentchat` 一次一条命令 |
+| **Discord = 身份权威源** | 账号的 Discord username 永远是真相；本地 `account.name` 在 set-discord / rename 时被强制同步 |
+| **两动词 `read` / `send`** | M9 Phase 2 砍掉了 `history` / `reply-ack` / `--requires-ack` / `--all`。打开一个 room 就 `read`，写一句话就 `send` |
+| **State 是事实** | agent 主循环只看 `agentchat watch state`（NDJSON 长连接），daemon 端 200 ms 防抖 + 版本号单调递增 |
+| **每个 mutation 走事务 + audit** | 业务写 + audit row 同 tx 提交，任意失败一起回滚（参考 `store.Bundler.WithTx`） |
+| **失败模式可分辨** | 所有错误带 `errcode.Code` 字符串 + 固定 exit code，agent 能直接 branch |
+
+---
+
+## 3. 两个二进制
+
+```
+┌────────────────────────────────────────────────────────────┐
+│  Discord cloud  (gateway WSS + REST, source of truth)      │
+└──────────────────────────▲─────────────────────────────────┘
+                           │ discordgo  (one WS per bot)
+                ┌──────────┴───────────┐
+                │ agentchatd  (daemon) │
+                │  ─ SQLite + WAL      │
+                │  ─ master.key (AES)  │
+                │  ─ Connector + bots  │
+                │  ─ Ingester / Bus    │
+                │  ─ Downloader        │
+                │  ─ HTTP on UDS       │
+                └──────────▲───────────┘
+                           │  HTTP/1.1 + NDJSON streams
+                           │  over <data-root>/agentchatd.sock
+              ┌────────────┴────────────┐
+              │ agentchat CLI (cobra)   │
+              │  ─ 单次命令一次 HTTP    │
+              │  ─ watch state / events │
+              │  ─ JSON when piped      │
+              └─────────────────────────┘
+```
+
+| 二进制 | 入口 | 责任 |
+|---|---|---|
+| `agentchatd` | [`cmd/agentchatd/`](../cmd/agentchatd/) | 长驻，独占 data-root，持有 Discord 会话、SQLite、state bus、附件下载器、UDS HTTP 服务 |
+| `agentchat` | [`cmd/agentchat/`](../cmd/agentchat/) | 短命客户端，唯一接口；输出走 `outputJSON()` 自动判定（TTY 表格 / pipe JSON） |
+
+两个 binary 都从 `cmd/<name>/cmds/` 通过 cobra 注册，main.go 只剩一行 `Execute()`。
+
+---
+
+## 4. 角色与权限
+
+| Role | 主要能力 | 不能做 |
+|---|---|---|
+| **admin** | 账号 CRUD、token 签发/吊销、`set-discord`、`online/offline`、room CRUD、`invite/kick`、`system-announce`、`debug *`、读 / 发任意 room（不要求 membership）、读 audit | （无） |
+| **user** | `whoami`、`read`、`send`（仅自己所属 room）、`room subscribe/unsubscribe/list/show/members`、`room announce`（任何 room 成员）、`ack-announcement`、`ack-system`、`watch state` / `state` | 上面 admin 列出的全部 admin-only |
+
+首次启动 daemon 时数据库为空，自动创建 `name=root` admin 账号并**一次性**打印 API token（见 [`cmd/agentchatd/cmds/serve.go:bootstrapRoot`](../cmd/agentchatd/cmds/serve.go)）。丢了就只能 `rm -rf <data-root>` 重来。
+
+---
+
+## 5. 数据流的两条主链
+
+### 5.1 Inbound（Discord → agentchat）
+
+```
+Discord gateway
+      │ MESSAGE_CREATE / CHANNEL_DELETE / READY / DISCONNECT
+      ▼
+discord.Provider (internal/bot/discord)
+      │ bot.Event   (channel-based, drops on slow consumer)
+      ▼
+connector.Connector  (per-account fan-out, mutex-guarded pump)
+      │ Subscription.C  ← message.Ingester 订阅
+      ▼
+message.Ingester
+      │ store.Bundler.WithTx:
+      │   ├─ rooms.GetByDiscordChannelID
+      │   ├─ messages.CreateIgnoreConflict  ← 同一行 discord_msg_id 与 send 路径汇合
+      │   ├─ message_states 扇出 (所有成员，author 标 read)
+      │   ├─ message_mentions / mention_everyone
+      │   └─ attachments.Create  (downloaded_at=NULL, downloader 之后取)
+      ▼
+state.Bus.PublishMany(memberIDs)   (200ms 防抖)
+      │
+      ▼
+state.Aggregator.Build → Snapshot  → watch state 订阅者
+```
+
+### 5.2 Outbound（CLI → Discord）
+
+```
+agentchat send <room> "@bob hi" --attach x.png
+      │  HTTP POST /v1/rooms/{id}/messages
+      ▼
+api/v1.SendMessage handler
+      │  Read tx: room exists, actor is member or admin, members + bot_user_ids
+      │  bot.ParseMentions(content, members)  → rewrite @<name> → <@uid>
+      │  Attachment lstat + ≤ 10 MB guard
+      │  ↓  (slow, outside tx)
+      │  discord.Provider.SendMessage   ← discordgo Complex call, AllowedMentions
+      │  ↓
+      │  Write tx:
+      │    ├─ messages.CreateIgnoreConflict (race-safe vs ingester echo)
+      │    ├─ ApplySendMetadata (priority/replyTo/contentHash 等)
+      │    ├─ message_mentions.AddForMessage
+      │    ├─ message_states 扇出 + author=read
+      │    ├─ attachments.Create / MarkDownloaded
+      │    └─ audit message.send
+      ▼
+state.Bus.PublishMany(memberIDs) (after commit)
+```
+
+`messages.discord_msg_id` 是 UNIQUE：两条路径（send / ingest gateway echo）通过 INSERT-or-IGNORE 汇合到同一行，相关 metadata 用 `ApplySendMetadata` / `MergeMentionEveryone` / `AddForMessage` 做幂等合并。
+
+---
+
+## 6. 当前实现的里程碑映射
+
+| Milestone | 关键产物 | 仍在用的代码 |
+|---|---|---|
+| **M1** 基础脚手架 | repo / Makefile / errcode / cliutil | [`internal/errcode`](../internal/errcode), [`internal/cliutil`](../internal/cliutil) |
+| **M2** 账号 + token + audit | SQLite 三表（accounts / tokens / audit_log）、auth 中间件、cli.toml | [`internal/account`](../internal/account), [`internal/auth`](../internal/auth), [`internal/audit`](../internal/audit) |
+| **M3** Discord 接入 | bot.Provider 接口 + discord 实现、Connector、master.key、set-discord/online/offline | [`internal/bot`](../internal/bot), [`internal/connector`](../internal/connector), [`internal/crypto`](../internal/crypto) |
+| **M4** rooms + messages | rooms / memberships / messages / message_states、send + ingester | [`internal/api/v1/rooms.go`](../internal/api/v1/rooms.go), [`internal/api/v1/messages.go`](../internal/api/v1/messages.go), [`internal/message`](../internal/message) |
+| **M5** state 聚合 | Aggregator + Bus + watch state NDJSON | [`internal/state`](../internal/state), [`internal/api/v1/state.go`](../internal/api/v1/state.go) |
+| **M6** 公告 | 群公告 / 系统公告 + 防 `mention_all` 替代品 | [`internal/api/v1/announcements.go`](../internal/api/v1/announcements.go) |
+| **M7** 附件 | attachments 表 + 后台 downloader + 10 MB 上传 cap | [`internal/attachment`](../internal/attachment) |
+| **M8** 加固 | bcrypt 拆 tx 外、payload cap、data-root lock、master.key chmod、subscriber cap、debug.send 入 audit、IdentityProber 提前校验 token | 散落各包（详见 `docs/milestones/M8-*.md`） |
+| **M9 Phase 1** | mention 模型迁移：`messages.mention_everyone` + `message_mentions` 表，回填 `mention_all` | migrations 0005 |
+| **M9 Phase 2** | 两动词 collapse：`POST /v1/rooms/{id}/read`、外发 mention 解析 (`@<name>` → `<@uid>`)、`set-discord` IdentityProber + 名字同步、删 `requires_ack` / `mention_all` / `replied_at` 列 | migrations 0006、[`internal/bot/mentions.go`](../internal/bot/mentions.go)、[`internal/api/v1/messages.go::ReadRoom`](../internal/api/v1/messages.go) |
+| **后续** | startup/shutdown stale-online reconcile、host-specific Monitor 指南、out-of-band Discord 同步 | `cmd/agentchatd/cmds/serve.go::reconcileStaleOnlineLifecycles`，skills/ |
+
+> 一句话现状：**M1–M9 全部纳入主干**，主要修补集中在并发 / 安全 / 易用性；功能面已稳定到"agent + admin 都能用 CLI 跑完一天的工作流"。
+
+---
+
+## 7. 相邻文档
+
+- [`01-architecture.md`](./01-architecture.md)：组件 / 数据模型 / 关键不变量 / 并发模型
+- [`02-implemented-requirements.md`](./02-implemented-requirements.md)：当前实现覆盖的需求清单（按功能领域分组）
+- [`03-onboarding.md`](./03-onboarding.md)：新人 30 分钟跑通项目 + 找代码的地图
+- [`USAGE-ADMIN.md`](./USAGE-ADMIN.md) / [`USAGE-USER.md`](./USAGE-USER.md)：面向运维者 / 普通用户的操作手册（已存在，与本系列互补）
+- [`archive/`](./archive/)：旧 overview / requirements / architecture / roadmap / engineering workflow / cli redesign，做"为什么这样做"考古时回看
